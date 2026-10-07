@@ -16,11 +16,11 @@ ureq = { version = "3", default-features = false }
 # Model downloads use the OS TLS stack and certificate store there (no C toolchain needed).
 [target.'cfg(windows)'.dependencies]
 ort = { version = "=2.0.0-rc.13", default-features = false, features = ["directml"] }
-ureq = { version = "3", default-features = false, features = ["native-tls-no-default"] }
+ureq = { version = "3", default-features = false, features = ["native-tls"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 ort = { version = "=2.0.0-rc.13", default-features = false, features = ["coreml"] }
-ureq = { version = "3", default-features = false, features = ["native-tls-no-default"] }
+ureq = { version = "3", default-features = false, features = ["native-tls"] }
 
 [target.'cfg(not(any(windows, target_os = "macos")))'.dependencies]
 ureq = { version = "3", default-features = false, features = ["rustls"] }

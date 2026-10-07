@@ -56,7 +56,18 @@ jobs:
           New-Item -ItemType Directory dist | Out-Null
           Copy-Item target\release\dictum.exe dist\
           Get-ChildItem target\release -Filter *.dll | Copy-Item -Destination dist\
+          # ONNX Runtime is C++: ship the MSVC runtime next to the exe (app-local deployment),
+          # so Dictum runs without the VC++ Redistributable installed.
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $runtime = & $vswhere -latest -find "VC\Redist\MSVC\*\x64\Microsoft.VC*.CRT\vcruntime140.dll" | Select-Object -First 1
+          if (-not $runtime) { throw "MSVC runtime not found" }
+          $crt = Split-Path $runtime
+          Write-Host "CRT: $crt"
+          Get-ChildItem $crt -Filter *.dll | Where-Object { $_.Name -match '^(msvcp140|vcruntime140)' } | Copy-Item -Destination dist\
+          $dumpbin = & $vswhere -latest -find "VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" | Select-Object -First 1
+          & $dumpbin /nologo /dependents dist\dictum.exe
           Copy-Item README.md, THIRD_PARTY_NOTICES.md dist\
+          Get-ChildItem dist | Format-Table Name, Length
           Compress-Archive -Path dist\* -DestinationPath dictum-windows-x64.zip
       - uses: actions/upload-artifact@v4
         with:

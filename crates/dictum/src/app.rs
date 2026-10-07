@@ -349,7 +349,8 @@ impl Controller {
         self.board.update(|s| {
             s.recording = false;
             s.error = None;
-            if matches!(stopped, Ok(Stopped::Pending(_))) {
+            // Every successful stop queues exactly one result for the output thread.
+            if stopped.is_ok() {
                 s.pending += 1;
             }
         });
