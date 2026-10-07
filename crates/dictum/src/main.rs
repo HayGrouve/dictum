@@ -4,7 +4,7 @@
 
 #![cfg_attr(all(windows, not(debug_assertions), not(test)), windows_subsystem = "windows")]
 // The platform-independent core is built (and unit-tested) everywhere, but only wired up on
-// supported platforms.
+// supported platforms; the settings window and updater are Windows-only so far.
 #![cfg_attr(not(windows), allow(dead_code))]
 
 mod config;
@@ -17,18 +17,18 @@ mod sounds;
 mod ui;
 mod update;
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 mod app;
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 mod audio;
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 mod logging;
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 mod paths;
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 mod platform;
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 fn main() {
     if let Err(e) = app::run() {
         log::error!("fatal: {e:#}");
@@ -36,8 +36,8 @@ fn main() {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 fn main() {
-    eprintln!("Dictum currently runs on Windows; macOS support is planned (see docs/ARCHITECTURE.md).");
+    eprintln!("Dictum runs on Windows and macOS.");
     std::process::exit(1);
 }

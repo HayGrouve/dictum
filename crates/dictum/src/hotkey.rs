@@ -159,10 +159,10 @@ pub fn key_name(key: Key) -> String {
         Key::RCtrl => "Right Ctrl".into(),
         Key::LShift => "Left Shift".into(),
         Key::RShift => "Right Shift".into(),
-        Key::LAlt => "Left Alt".into(),
-        Key::RAlt => "Right Alt".into(),
-        Key::LMeta => "Left Win".into(),
-        Key::RMeta => "Right Win".into(),
+        Key::LAlt => if cfg!(target_os = "macos") { "Left Option" } else { "Left Alt" }.into(),
+        Key::RAlt => if cfg!(target_os = "macos") { "Right Option" } else { "Right Alt" }.into(),
+        Key::LMeta => if cfg!(target_os = "macos") { "Left Cmd" } else { "Left Win" }.into(),
+        Key::RMeta => if cfg!(target_os = "macos") { "Right Cmd" } else { "Right Win" }.into(),
         Key::Fn => "Fn".into(),
         Key::CapsLock => "Caps Lock".into(),
         Key::Space => "Space".into(),
@@ -399,9 +399,18 @@ mod tests {
 
     #[test]
     fn display_names_parse_back() {
-        for spec in
-            ["ctrl+win", "right_ctrl", "left_alt+space", "ctrl+shift+f13", "caps_lock", "esc", "ctrl+k"]
-        {
+        for spec in [
+            "ctrl+win",
+            "right_ctrl",
+            "left_alt+space",
+            "right_alt",
+            "right_cmd",
+            "ctrl+shift+f13",
+            "caps_lock",
+            "esc",
+            "ctrl+k",
+            "fn",
+        ] {
             let hotkey = Hotkey::parse(spec).unwrap();
             assert_eq!(Hotkey::parse(&hotkey.to_string()).unwrap(), hotkey, "{spec}");
         }
