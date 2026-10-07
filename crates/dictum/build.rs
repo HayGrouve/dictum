@@ -1,4 +1,5 @@
-//! Windows: embeds the app icon (rendered from the same code as the tray icon) and version info.
+//! Windows: embeds the app icon (rendered from the same code as the tray icon), version info and a
+//! manifest (modern controls and per-monitor DPI scaling for the settings window).
 
 #[allow(dead_code)]
 #[path = "src/ui.rs"]
@@ -21,6 +22,8 @@ fn main() {
     let out = PathBuf::from(std::env::var("OUT_DIR").unwrap());
     let ico = out.join("dictum.ico");
     std::fs::write(&ico, ico_file(&[16, 24, 32, 48, 64, 256])).unwrap();
+    let manifest = out.join("dictum.manifest");
+    std::fs::write(&manifest, MANIFEST).unwrap();
     let rc = out.join("dictum.rc");
     let version = env!("CARGO_PKG_VERSION");
     let commas = version.replace('.', ",");
@@ -28,6 +31,7 @@ fn main() {
         &rc,
         format!(
             r#"1 ICON "{ico}"
+1 24 "{manifest}"
 1 VERSIONINFO
 FILEVERSION {commas},0
 PRODUCTVERSION {commas},0
@@ -50,11 +54,29 @@ BEGIN
 END
 "#,
             ico = ico.display().to_string().replace('\\', "\\\\"),
+            manifest = manifest.display().to_string().replace('\\', "\\\\"),
         ),
     )
     .unwrap();
     embed_resource::compile(&rc, embed_resource::NONE).manifest_optional().unwrap();
 }
+
+const MANIFEST: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <dependency>
+    <dependentAssembly>
+      <assemblyIdentity type="win32" name="Microsoft.Windows.Common-Controls" version="6.0.0.0"
+        processorArchitecture="*" publicKeyToken="6595b64144ccf1df" language="*" />
+    </dependentAssembly>
+  </dependency>
+  <application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings>
+      <dpiAware xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">true/pm</dpiAware>
+      <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">PerMonitorV2</dpiAwareness>
+    </windowsSettings>
+  </application>
+</assembly>
+"#;
 
 /// An .ico with one 32-bit BMP image per size.
 fn ico_file(sizes: &[u32]) -> Vec<u8> {

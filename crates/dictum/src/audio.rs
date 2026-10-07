@@ -4,13 +4,42 @@
 //! few milliseconds instead of a device open. While paused, the OS does not consider the
 //! microphone in use.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
 
 use anyhow::{Context, Result, anyhow, bail};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, Sample, SampleFormat, SizedSample};
 use crossbeam_channel::{Receiver, Sender};
+
+/// Lists the connected microphones in the background and hands the names to `reply`.
+///
+/// Always on the same long-lived thread: on Windows, cpal's shared device enumerator belongs to
+/// the COM apartment of the first thread that uses it, and stops working once that thread exits.
+pub fn list_microphones(reply: impl FnOnce(Vec<String>) + Send + 'static) {
+    type Reply = Box<dyn FnOnce(Vec<String>) + Send>;
+    static REQUESTS: OnceLock<Sender<Reply>> = OnceLock::new();
+    let requests = REQUESTS.get_or_init(|| {
+        let (tx, rx) = crossbeam_channel::unbounded::<Reply>();
+        std::thread::Builder::new()
+            .name("devices".into())
+            .spawn(move || {
+                for reply in rx {
+                    let names = match cpal::default_host().input_devices() {
+                        Ok(devices) => devices.map(|d| d.to_string()).collect(),
+                        Err(e) => {
+                            log::warn!("failed to list microphones: {e}");
+                            Vec::new()
+                        }
+                    };
+                    reply(names);
+                }
+            })
+            .expect("failed to spawn thread");
+        tx
+    });
+    let _ = requests.send(Box::new(reply));
+}
 
 struct Live {
     stream: cpal::Stream,

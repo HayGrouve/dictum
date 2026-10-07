@@ -53,7 +53,11 @@ Runtime ships prebuilt for Windows (with DirectML), macOS (with CoreML) and Linu
   `SendInput` paste/typing, clipboard save/restore of every HGLOBAL format plus
   `ExcludeClipboardContentFromMonitorProcessing` / `CanIncludeInClipboardHistory=0`,
   message-only window for cross-thread status updates and clipboard ownership, `tray-icon` menu,
-  `PlaySound` cues synthesised at runtime, HKCU `Run` autostart, single-instance mutex.
+  `PlaySound` cues synthesised at runtime, HKCU `Run` autostart, single-instance mutex, and the
+  settings window: a modeless dialog built from an in-memory `DLGTEMPLATEEX` (dialog units, so it
+  scales with DPI; Common Controls v6 via the manifest in `build.rs`). Device listing runs off the
+  main thread. Saving writes only the changed fields with `toml_edit`, so comments survive, then
+  restarts the app. The text conversions behind it (`settings.rs`) are platform independent.
 
 ## Adding macOS
 

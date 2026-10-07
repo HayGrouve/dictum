@@ -3,8 +3,9 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::Deserialize;
+use toml_edit::{Array, DocumentMut, Item, Table, Value};
 
 use crate::hotkey::{self, Hotkey, Key};
 
@@ -15,6 +16,15 @@ pub enum InsertMethod {
     Paste,
     /// Type the text as synthetic key presses (never touches the clipboard).
     Type,
+}
+
+impl InsertMethod {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            InsertMethod::Paste => "paste",
+            InsertMethod::Type => "type",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -127,10 +137,92 @@ impl Config {
     }
 }
 
+/// Writes the settings that differ between `from` and `to` into the config file, keeping its
+/// comments, layout and every other setting. Returns whether the file changed.
+pub fn save_changes(path: &Path, from: &Config, to: &Config) -> Result<bool> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => default_file(),
+        Err(e) => return Err(e).with_context(|| format!("failed to read {}", path.display())),
+    };
+    let updated = edit(&text, from, to).with_context(|| format!("error in {}", path.display()))?;
+    if updated == text {
+        return Ok(false);
+    }
+    Config::parse(&updated).context("the new settings are invalid")?;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    // Write then rename, so a crash can't leave a half-written file behind.
+    let temp = path.with_extension("toml.tmp");
+    std::fs::write(&temp, &updated).with_context(|| format!("failed to write {}", temp.display()))?;
+    std::fs::rename(&temp, path).with_context(|| format!("failed to replace {}", path.display()))?;
+    Ok(true)
+}
+
+/// The settings window's fields, written into `text` where they changed.
+fn edit(text: &str, from: &Config, to: &Config) -> Result<String> {
+    let mut doc: DocumentMut = text.parse()?;
+    let root = doc.as_table_mut();
+    let mut set = |key: &str, changed: bool, value: Value| {
+        if changed {
+            set_value(root, key, value);
+        }
+    };
+    set("hotkey", from.hotkey != to.hotkey, to.hotkey.as_str().into());
+    set("insert_method", from.insert_method != to.insert_method, to.insert_method.as_str().into());
+    set("restore_clipboard", from.restore_clipboard != to.restore_clipboard, to.restore_clipboard.into());
+    set("trailing_space", from.trailing_space != to.trailing_space, to.trailing_space.into());
+    set("remove_fillers", from.remove_fillers != to.remove_fillers, to.remove_fillers.into());
+    set("voice_commands", from.voice_commands != to.voice_commands, to.voice_commands.into());
+    set("sounds", from.sounds != to.sounds, to.sounds.into());
+    set("microphone", from.microphone != to.microphone, to.microphone.as_str().into());
+    set("vocabulary", from.vocabulary != to.vocabulary, string_array(&to.vocabulary));
+
+    if from.replacements != to.replacements {
+        let item = root.entry("replacements").or_insert_with(toml_edit::table);
+        let Some(table) = item.as_table_like_mut() else { bail!("`replacements` is not a table") };
+        let stale: Vec<String> =
+            table.iter().map(|(k, _)| k.to_string()).filter(|k| !to.replacements.contains_key(k)).collect();
+        for key in stale {
+            table.remove(&key);
+        }
+        for (heard, written) in &to.replacements {
+            if table.get(heard).and_then(Item::as_str) != Some(written) {
+                table.insert(heard, toml_edit::value(written));
+            }
+        }
+    }
+    Ok(doc.to_string())
+}
+
+/// Replaces a value in place, keeping the comments around it.
+fn set_value(table: &mut Table, key: &str, mut value: Value) {
+    if let Some(old) = table.get(key).and_then(Item::as_value) {
+        *value.decor_mut() = old.decor().clone();
+    }
+    table[key] = Item::Value(value);
+}
+
+/// An inline array, or one item per line when that would get long.
+fn string_array(items: &[String]) -> Value {
+    let mut array: Array = items.iter().map(String::as_str).collect();
+    if array.to_string().len() > 80 {
+        for item in array.iter_mut() {
+            item.decor_mut().set_prefix("\n    ");
+            item.decor_mut().set_suffix("");
+        }
+        array.set_trailing("\n");
+        array.set_trailing_comma(true);
+    }
+    Value::Array(array)
+}
+
 pub fn default_file() -> String {
     let hotkey = Config::default().hotkey;
     format!(
-        r#"# Dictum settings. Restart Dictum (tray menu → Restart) after editing.
+        r#"# Dictum settings. Most are also in tray menu → Settings…; after editing this file by hand,
+# restart Dictum (tray menu → Restart).
 
 # Hold this to dictate; release to insert the text.
 # Examples: "ctrl+win", "right_ctrl", "right_alt", "ctrl+shift+space", "f13", "fn" (macOS).
@@ -222,6 +314,70 @@ mod tests {
     fn invalid_hotkey_is_rejected() {
         assert!(Config::parse("hotkey = \"ctrl+banana\"").is_err());
         assert!(Config::parse("insert_method = \"teleport\"").is_err());
+    }
+
+    #[test]
+    fn edits_keep_comments_and_untouched_settings() {
+        let text = "# My settings\n\n# Hold this.\nhotkey = \"control+super\" # mine\nthreads = 3\nsounds = true\n\n[replacements]\n# keep me\n\"get hub\" = \"GitHub\"\n\"versal\" = \"Vercel\"\n";
+        let from = Config::parse(text).unwrap();
+        let mut to = from.clone();
+        to.hotkey = "right_ctrl".into();
+        to.sounds = false;
+        to.insert_method = InsertMethod::Type;
+        to.vocabulary = vec!["Claude Code".into(), "pnpm".into()];
+        to.replacements.remove("versal");
+        to.replacements.insert("turbo repo".into(), "Turborepo".into());
+
+        let edited = edit(text, &from, &to).unwrap();
+        let expected = "# My settings\n\n# Hold this.\nhotkey = \"right_ctrl\" # mine\nthreads = 3\nsounds = false\ninsert_method = \"type\"\nvocabulary = [\"Claude Code\", \"pnpm\"]\n\n[replacements]\n# keep me\n\"get hub\" = \"GitHub\"\n\"turbo repo\" = \"Turborepo\"\n";
+        assert_eq!(edited, expected);
+        let reparsed = Config::parse(&edited).unwrap();
+        assert_eq!(reparsed.threads, 3);
+        assert_eq!(reparsed.vocabulary, to.vocabulary);
+        assert_eq!(reparsed.replacements, to.replacements);
+
+        // Nothing changed: the text comes back byte for byte.
+        assert_eq!(edit(text, &from, &from).unwrap(), text);
+    }
+
+    #[test]
+    fn edits_the_default_file() {
+        let text = default_file();
+        let from = Config::parse(&text).unwrap();
+        let mut to = from.clone();
+        to.remove_fillers = false;
+        to.vocabulary =
+            ["Claude Code", "Vercel", "shadcn", "TanStack", "Convex", "pnpm", "Turborepo", "Next.js"]
+                .map(String::from)
+                .to_vec();
+        to.replacements.insert("get hub".into(), "GitHub".into());
+        let edited = edit(&text, &from, &to).unwrap();
+        assert!(edited.contains("# Drop hesitations like \"um\" and \"uh\".\nremove_fillers = false\n"));
+        assert!(edited.contains("vocabulary = [\n    \"Claude Code\",\n    \"Vercel\","));
+        assert!(edited.contains("    \"Next.js\",\n]\n"));
+        assert_eq!(
+            edited.lines().filter(|l| l.starts_with('#')).count(),
+            text.lines().filter(|l| l.starts_with('#')).count()
+        );
+        let reparsed = Config::parse(&edited).unwrap();
+        assert!(!reparsed.remove_fillers);
+        assert_eq!(reparsed.vocabulary, to.vocabulary);
+        assert_eq!(reparsed.replacements, to.replacements);
+    }
+
+    #[test]
+    fn saves_only_when_something_changed() {
+        let dir = std::env::temp_dir().join(format!("dictum-config-save-{}", std::process::id()));
+        let path = dir.join("config.toml");
+        let _ = std::fs::remove_dir_all(&dir);
+        let from = Config::load_or_create(&path).unwrap();
+        assert!(!save_changes(&path, &from, &from).unwrap());
+        let mut to = from.clone();
+        to.microphone = "USB".into();
+        assert!(save_changes(&path, &from, &to).unwrap());
+        assert_eq!(Config::load_or_create(&path).unwrap().microphone, "USB");
+        assert!(!dir.join("config.toml.tmp").exists());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

@@ -6,6 +6,7 @@ mod clipboard;
 mod hook;
 mod input;
 mod keys;
+mod settings;
 #[cfg(test)]
 mod tests;
 mod updates;
@@ -310,15 +311,17 @@ pub fn run(ui: &Ui, bindings: Bindings, commands: Sender<Command>, paths: &Paths
             unsafe { PostQuitMessage(0) };
             continue;
         }
-        unsafe {
-            TranslateMessage(&msg);
-            DispatchMessageW(&msg);
+        if !settings::dialog_message(&msg) {
+            unsafe {
+                TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
         }
         while TrayIconEvent::receiver().try_recv().is_ok() {}
         while let Ok(event) = MenuEvent::receiver().try_recv() {
             let id = event.id();
             if id == settings_item.id() {
-                open(&paths.config_file);
+                settings::open(&paths.config_file);
             } else if id == log_item.id() {
                 open(&paths.log_file);
             } else if id == autostart_item.id() {
@@ -335,6 +338,15 @@ pub fn run(ui: &Ui, bindings: Bindings, commands: Sender<Command>, paths: &Paths
                 let _ = commands.send(Command::Quit);
                 unsafe { PostQuitMessage(0) };
             } else if id == quit_item.id() {
+                let _ = commands.send(Command::Quit);
+                unsafe { PostQuitMessage(0) };
+            }
+        }
+        if let Some(changed) = settings::take_saved() {
+            // The settings window can change "Start with Windows" too.
+            autostart_item.set_checked(autostart::is_enabled());
+            if changed {
+                restart = true;
                 let _ = commands.send(Command::Quit);
                 unsafe { PostQuitMessage(0) };
             }

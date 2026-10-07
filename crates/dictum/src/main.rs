@@ -11,6 +11,7 @@ mod config;
 mod hotkey;
 mod icons;
 mod pipeline;
+mod settings;
 mod sounds;
 mod ui;
 mod update;
