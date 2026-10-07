@@ -9,6 +9,7 @@
 //! Everything here is platform independent; the app crate owns audio capture, hotkeys and text
 //! insertion.
 
+mod boost;
 pub mod model;
 mod parakeet;
 mod resample;
@@ -42,4 +43,6 @@ pub struct EngineOptions {
     pub device: Device,
     /// Threads for the acoustic encoder. `0` lets ONNX Runtime pick (one per physical core).
     pub threads: usize,
+    /// Terms to favour when the audio is ambiguous, e.g. "Claude Code", "Vercel".
+    pub vocabulary: Vec<String>,
 }

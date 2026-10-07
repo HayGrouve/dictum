@@ -11,11 +11,12 @@ crates/
 | Module | Responsibility |
 | --- | --- |
 | `parakeet.rs` | Parakeet TDT inference: `nemo128.onnx` (log-mel features) → FastConformer encoder (int8) → greedy TDT decoding with the joint `decoder_joint` model. `Interrupt` cancels an in-flight run (ONNX Runtime `RunOptions::terminate` + a flag checked between decoder steps). |
+| `boost.rs` | Vocabulary boosting. The user's terms are matched against the model's SentencePiece tokens (case-insensitive, every segmentation); during greedy decoding, tokens that start or continue a term get a logit bonus (12; halved for terms under 5 letters). It is all-or-nothing per term: when a boosted token changes the output, the decoder checkpoints and rolls back (boosting off for that step) unless the term is completed, so a half-forced term never leaves fragments. With a 40-term dev vocabulary the reference transcripts are unchanged (`vocabulary_does_not_change_ordinary_speech`). |
 | `vad.rs` | Silero VAD v6 (bundled, 2 MB); 32 ms windows with carried state. |
 | `segment.rs` | Turns a recording into segments: hysteresis on VAD probabilities, trimming with padding, `Pause` snapshots and splits at pauses once a segment is ≥ 10 s. Snapshots and segments are identified by `SegmentKey` (exact sample range) so identical audio is never transcribed twice. |
 | `resample.rs` | Streaming Kaiser-windowed sinc resampler (polyphase table, exact integer positions) from the device rate to 16 kHz. |
 | `vocab.rs` | SentencePiece detokenisation. |
-| `text.rs` | Deterministic clean-up: filler removal, voice commands, personal dictionary. No LLM — microseconds, no network. |
+| `text.rs` | Deterministic clean-up: filler removal, voice commands, vocabulary spelling (terms written as listed, split/joined words and one-letter misses in long terms corrected), personal dictionary. No LLM — microseconds, no network. |
 | `model.rs` | Pinned model manifest (sizes + SHA-256) and a resumable, verifying downloader. |
 
 Why Parakeet TDT on ONNX Runtime: best accuracy/speed trade-off for local dictation on CPUs

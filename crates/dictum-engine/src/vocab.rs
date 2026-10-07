@@ -6,7 +6,7 @@ pub(crate) struct Vocab {
     blank: usize,
 }
 
-const WORD_START: char = '\u{2581}'; // SentencePiece "▁"
+pub(crate) const WORD_START: char = '\u{2581}'; // SentencePiece "▁"
 
 impl Vocab {
     pub(crate) fn parse(text: &str) -> Result<Self> {
@@ -38,6 +38,10 @@ impl Vocab {
 
     pub(crate) fn blank(&self) -> usize {
         self.blank
+    }
+
+    pub(crate) fn token(&self, id: usize) -> Option<&str> {
+        self.tokens.get(id).map(String::as_str)
     }
 
     /// Turns token ids into text, the same way SentencePiece does, plus a small clean-up for
