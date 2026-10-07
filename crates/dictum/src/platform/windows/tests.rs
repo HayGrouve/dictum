@@ -11,7 +11,7 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput, SetFocus, VK_RCONTROL, VK_SPACE,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CB_SETCURSEL, CBN_SELCHANGE, CreateWindowExW, DestroyWindow, DispatchMessageW, FindWindowW, GetDlgItem,
+    CB_SETCURSEL, CBN_SELCHANGE, CreateWindowExW, DestroyWindow, DispatchMessageW, GetDlgItem,
     GetForegroundWindow, GetWindowTextW, IDCANCEL, IDOK, MSG, PM_REMOVE, PeekMessageW, SW_SHOW,
     SendDlgItemMessageW, SendMessageW, SetForegroundWindow, ShowWindow, TranslateMessage, WM_COMMAND,
     WS_BORDER, WS_POPUP, WS_VISIBLE,
@@ -346,27 +346,10 @@ fn settings_window_rejects_an_invalid_hotkey() {
     let dialog = window::window().expect("settings window opens");
     set_text(dialog, ID_HOTKEY, "ctrl+banana");
 
-    // The warning is modal: dismiss it from another thread. A message box ignores commands
-    // posted while it is still being set up, so keep pressing OK until it is gone.
-    let dismisser = std::thread::spawn(|| {
-        let deadline = Instant::now() + Duration::from_secs(10);
-        let mut seen = false;
-        while Instant::now() < deadline {
-            let found = unsafe { FindWindowW(wide("#32770").as_ptr(), wide("Dictum").as_ptr()) };
-            if found.is_null() {
-                if seen {
-                    return true;
-                }
-            } else {
-                seen = true;
-                unsafe { PostMessageW(found, WM_COMMAND, IDOK as usize, 0) };
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        }
-        false
-    });
     click(dialog, IDOK);
-    assert!(dismisser.join().unwrap(), "a warning was shown");
+    let warnings = WARNINGS.with(|w| w.take());
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(warnings[0].contains("“ctrl+banana” is not a valid hotkey"), "{}", warnings[0]);
     assert_eq!(window::take_saved(), None);
     assert_eq!(window::window(), Some(dialog), "still open for a fix");
     assert_eq!(config.text(), SETTINGS_FILE, "file untouched");

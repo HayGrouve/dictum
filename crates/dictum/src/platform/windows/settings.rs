@@ -18,11 +18,11 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     CB_RESETCONTENT, CB_SETCURSEL, CBN_SELCHANGE, CBS_AUTOHSCROLL, CBS_DROPDOWN, CBS_DROPDOWNLIST,
     CreateDialogIndirectParamW, DS_CENTER, DS_MODALFRAME, DS_SETFONT, DestroyWindow, ES_AUTOVSCROLL,
     ES_MULTILINE, ES_WANTRETURN, GetDlgItem, GetDlgItemTextW, GetSystemMetrics, GetWindowTextLengthW,
-    ICON_BIG, ICON_SMALL, IDCANCEL, IDOK, IMAGE_ICON, IsDialogMessageW, LR_SHARED, LoadImageW,
-    MB_ICONWARNING, MSG, MessageBoxW, PostMessageW, SM_CXICON, SM_CXSMICON, SM_CYICON, SM_CYSMICON,
-    SW_RESTORE, SW_SHOW, SendDlgItemMessageW, SendMessageW, SetDlgItemTextW, SetForegroundWindow, ShowWindow,
-    WM_APP, WM_COMMAND, WM_INITDIALOG, WM_NCDESTROY, WM_NEXTDLGCTL, WM_SETICON, WS_CAPTION, WS_CHILD,
-    WS_EX_APPWINDOW, WS_EX_CLIENTEDGE, WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
+    ICON_BIG, ICON_SMALL, IDCANCEL, IDOK, IMAGE_ICON, IsDialogMessageW, LR_SHARED, LoadImageW, MSG,
+    PostMessageW, SM_CXICON, SM_CXSMICON, SM_CYICON, SM_CYSMICON, SW_RESTORE, SW_SHOW, SendDlgItemMessageW,
+    SendMessageW, SetDlgItemTextW, SetForegroundWindow, ShowWindow, WM_APP, WM_COMMAND, WM_INITDIALOG,
+    WM_NCDESTROY, WM_NEXTDLGCTL, WM_SETICON, WS_CAPTION, WS_CHILD, WS_EX_APPWINDOW, WS_EX_CLIENTEDGE,
+    WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
 };
 
 use super::{autostart, wide};
@@ -308,8 +308,21 @@ fn complain(hwnd: HWND, id: i32, text: &str) {
     unsafe { SendMessageW(hwnd, WM_NEXTDLGCTL, GetDlgItem(hwnd, id) as WPARAM, 1) };
 }
 
+#[cfg(not(test))]
 fn message(owner: HWND, text: &str) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{MB_ICONWARNING, MessageBoxW};
     unsafe { MessageBoxW(owner, wide(text).as_ptr(), wide("Dictum").as_ptr(), MB_ICONWARNING) };
+}
+
+// Tests can't click a modal message box away reliably: record the warnings instead.
+#[cfg(test)]
+thread_local! {
+    pub(super) static WARNINGS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+fn message(_owner: HWND, text: &str) {
+    WARNINGS.with(|w| w.borrow_mut().push(text.to_string()));
 }
 
 fn set_icons(hwnd: HWND) {
