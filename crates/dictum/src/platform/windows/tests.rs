@@ -198,6 +198,7 @@ fn keyboard_hook_drives_hotkey_actions() {
         return;
     };
     assert_eq!(first, Action::Start);
+    assert!(hotkey_held(&Hotkey::parse("right_ctrl").unwrap()), "held key is visible to the watchdog");
     std::thread::sleep(Duration::from_millis(400));
     press(&[key_event(VK_SPACE, false), key_event(VK_SPACE, true)]);
     assert_eq!(next(), Some(Action::LockHandsFree));

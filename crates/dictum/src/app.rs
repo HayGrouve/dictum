@@ -112,12 +112,21 @@ pub fn run() -> Result<()> {
         let spec = spec.clone();
         let models_dir = config.model_dir.clone().unwrap_or(paths.models_dir.clone());
         spawn("worker", move || {
-            let engine = match load_engine(&config, &models_dir, &board) {
-                Ok(engine) => engine,
-                Err(e) => {
-                    log::error!("{e:#}");
-                    board.update(|s| s.error = Some(format!("{e}")));
-                    return;
+            // Retry with backoff: the first run may happen offline or on a flaky connection.
+            let mut delay = Duration::from_secs(15);
+            let engine = loop {
+                match load_engine(&config, &models_dir, &board) {
+                    Ok(engine) => break engine,
+                    Err(e) => {
+                        log::error!("{e:#}; retrying in {}s", delay.as_secs());
+                        board.update(|s| {
+                            s.loading = None;
+                            s.error = Some(format!("{e}; retrying in {}s", delay.as_secs()));
+                        });
+                        std::thread::sleep(delay);
+                        delay = (delay * 2).min(Duration::from_secs(300));
+                        board.update(|s| s.error = None);
+                    }
                 }
             };
             ready.store(true, Ordering::SeqCst);
@@ -225,6 +234,8 @@ enum Mode {
 
 /// Taps shorter than this are treated as accidental.
 const MIN_HOLD: Duration = Duration::from_millis(250);
+/// Hotkey physically up this long without a release event from the hook: stop anyway.
+const MISSED_RELEASE: Duration = Duration::from_millis(500);
 
 struct Controller {
     config: Config,
@@ -241,7 +252,7 @@ impl Controller {
     fn run(mut self, commands: Receiver<Command>) {
         self.mic.warm_up();
         let chunks = self.mic.chunks().clone();
-        let mut released_ticks = 0;
+        let mut released_since: Option<Instant> = None;
         loop {
             select! {
                 recv(commands) -> cmd => match cmd {
@@ -261,16 +272,18 @@ impl Controller {
             if !self.dictation.is_recording() {
                 continue;
             }
-            // Safety nets: a missed key-up must not leave the mic on forever.
-            if let Mode::Holding { .. } = self.mode {
-                released_ticks = if platform::hotkey_held(&self.hotkey) { 0 } else { released_ticks + 1 };
-                if released_ticks >= 3 {
+            // Safety net: a missed key-up must not leave the mic on forever. Normal releases
+            // arrive from the hook within milliseconds, long before this fires.
+            if matches!(self.mode, Mode::Holding { .. }) && !platform::hotkey_held(&self.hotkey) {
+                let since = *released_since.get_or_insert_with(Instant::now);
+                if since.elapsed() >= MISSED_RELEASE {
                     log::warn!("hotkey no longer held but no release seen; stopping");
+                    released_since = None;
                     self.ui.reset_hotkey();
                     self.on_action(Action::Stop);
                 }
             } else {
-                released_ticks = 0;
+                released_since = None;
             }
             if self.dictation.recorded().as_secs() >= u64::from(self.config.max_recording_secs) {
                 log::warn!("maximum recording length reached");
