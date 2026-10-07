@@ -46,7 +46,7 @@ Windows, macOS and Linux):
 | --- | --- |
 | Accuracy (LibriSpeech dev-clean sample + JFK) | **2.5 % WER** |
 | Speed (4 vCPU slice of a Ryzen 5 5600G, WSL) | **~19× faster than real time** on CPU (11 s of speech → 0.57 s) |
-| Speed (GitHub's Windows runner, 4 vCPU) | ~6× faster than real time (11 s → 1.9 s) |
+| Speed (GitHub's Windows runner, only 2 vCPUs) | ~6× faster than real time (11 s → 1.9 s) |
 | Text ready after you release the key, typical dictation | **≈ 0 ms** (measured 12–615 µs) — transcribed speculatively while you pause |
 | 150 s continuous dictation | split at pauses and transcribed while you talk; ≈ 0 ms left at release, 3.1 % WER |
 
