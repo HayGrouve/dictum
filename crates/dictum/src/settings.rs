@@ -137,8 +137,8 @@ mod tests {
         assert_eq!(hold, "Hold Right Ctrl and speak; release to insert the text.");
         assert!(hands_free.contains("tap Space") && hands_free.contains("press Right Ctrl again"));
         assert_eq!(cancel, "Press Esc while recording to discard it.");
-        let [_, hands_free, _] = controls_help("ctrl+win", "f9", "esc");
-        assert!(hands_free.contains("tap F9") && hands_free.contains("press Ctrl+Win again"));
+        let [_, hands_free, _] = controls_help("ctrl+shift+space", "f9", "esc");
+        assert!(hands_free.contains("tap F9") && hands_free.contains("press Ctrl+Shift+Space again"));
     }
 
     #[test]
