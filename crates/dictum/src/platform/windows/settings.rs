@@ -15,14 +15,14 @@ use windows_sys::Win32::UI::Controls::{
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     BN_CLICKED, BS_AUTOCHECKBOX, BS_DEFPUSHBUTTON, BS_GROUPBOX, BS_PUSHBUTTON, CB_ADDSTRING, CB_GETCURSEL,
-    CB_RESETCONTENT, CB_SETCURSEL, CBN_SELCHANGE, CBS_AUTOHSCROLL, CBS_DROPDOWN, CBS_DROPDOWNLIST,
-    CreateDialogIndirectParamW, DS_CENTER, DS_MODALFRAME, DS_SETFONT, DestroyWindow, ES_AUTOVSCROLL,
-    ES_MULTILINE, ES_WANTRETURN, GetDlgItem, GetDlgItemTextW, GetSystemMetrics, GetWindowTextLengthW,
-    ICON_BIG, ICON_SMALL, IDCANCEL, IDOK, IMAGE_ICON, IsDialogMessageW, LR_SHARED, LoadImageW, MSG,
-    PostMessageW, SM_CXICON, SM_CXSMICON, SM_CYICON, SM_CYSMICON, SW_RESTORE, SW_SHOW, SendDlgItemMessageW,
-    SendMessageW, SetDlgItemTextW, SetForegroundWindow, ShowWindow, WM_APP, WM_COMMAND, WM_INITDIALOG,
-    WM_NCDESTROY, WM_NEXTDLGCTL, WM_SETICON, WS_CAPTION, WS_CHILD, WS_EX_APPWINDOW, WS_EX_CLIENTEDGE,
-    WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
+    CB_RESETCONTENT, CB_SETCURSEL, CBN_EDITCHANGE, CBN_SELCHANGE, CBS_AUTOHSCROLL, CBS_DROPDOWN,
+    CBS_DROPDOWNLIST, CreateDialogIndirectParamW, DS_CENTER, DS_MODALFRAME, DS_SETFONT, DestroyWindow,
+    ES_AUTOVSCROLL, ES_MULTILINE, ES_WANTRETURN, GetDlgItem, GetDlgItemTextW, GetSystemMetrics,
+    GetWindowTextLengthW, ICON_BIG, ICON_SMALL, IDCANCEL, IDOK, IMAGE_ICON, IsDialogMessageW, LR_SHARED,
+    LoadImageW, MSG, PostMessageW, SM_CXICON, SM_CXSMICON, SM_CYICON, SM_CYSMICON, SW_RESTORE, SW_SHOW,
+    SendDlgItemMessageW, SendMessageW, SetDlgItemTextW, SetForegroundWindow, ShowWindow, WM_APP, WM_COMMAND,
+    WM_INITDIALOG, WM_NCDESTROY, WM_NEXTDLGCTL, WM_SETICON, WS_CAPTION, WS_CHILD, WS_EX_APPWINDOW,
+    WS_EX_CLIENTEDGE, WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
 };
 
 use super::{autostart, wide};
@@ -42,6 +42,9 @@ pub(super) const ID_VOCABULARY: i32 = 109;
 pub(super) const ID_REPLACEMENTS: i32 = 110;
 pub(super) const ID_OPEN_FILE: i32 = 111;
 pub(super) const ID_INDICATOR: i32 = 112;
+pub(super) const ID_STUTTERS: i32 = 113;
+/// The "Controls" lines, one per `settings::controls_help` line.
+pub(super) const ID_CONTROLS: [i32; 3] = [114, 115, 116];
 
 /// Posted by the thread that lists the microphones.
 const WM_MICROPHONES: u32 = WM_APP + 10;
@@ -170,6 +173,14 @@ unsafe extern "system" fn dialog_proc(hwnd: HWND, msg: u32, wparam: WPARAM, _lpa
                     }
                 }
                 (ID_INSERT, CBN_SELCHANGE) => update_restore_enabled(hwnd),
+                // The edit text isn't updated yet when the selection changes: use the preset.
+                (ID_HOTKEY, CBN_SELCHANGE) => {
+                    let preset = selection(hwnd, ID_HOTKEY).and_then(|i| settings::HOTKEY_PRESETS.get(i));
+                    if let Some(preset) = preset {
+                        show_controls(hwnd, preset);
+                    }
+                }
+                (ID_HOTKEY, CBN_EDITCHANGE) => show_controls(hwnd, &text(hwnd, ID_HOTKEY)),
                 _ => return 0,
             }
             1
@@ -211,10 +222,12 @@ fn init(hwnd: HWND) {
     check(hwnd, ID_RESTORE, config.restore_clipboard);
     update_restore_enabled(hwnd);
     check(hwnd, ID_FILLERS, config.remove_fillers);
+    check(hwnd, ID_STUTTERS, config.remove_stutters);
     check(hwnd, ID_COMMANDS, config.voice_commands);
     check(hwnd, ID_SPACE, config.trailing_space);
     set_text(hwnd, ID_VOCABULARY, &settings::vocabulary_text(&config.vocabulary));
     set_text(hwnd, ID_REPLACEMENTS, &settings::replacements_text(&config.replacements));
+    show_controls(hwnd, &config.hotkey);
 
     // Listing devices can take a moment: keep it off the thread that runs the keyboard hook.
     let target = hwnd as usize;
@@ -238,6 +251,21 @@ fn show_microphones(hwnd: HWND) {
     });
     if let Some((labels, selected)) = update {
         fill_combo(hwnd, ID_MICROPHONE, &labels, Some(selected));
+    }
+}
+
+/// Explains the controls with `hotkey`; a hotkey that is still being typed leaves them as they are.
+fn show_controls(hwnd: HWND, hotkey: &str) {
+    if crate::hotkey::Hotkey::parse(hotkey).is_err() {
+        return;
+    }
+    let Some((hands_free, cancel)) = DIALOG.with(|d| {
+        d.borrow().as_ref().map(|d| (d.original.hands_free_key.clone(), d.original.cancel_key.clone()))
+    }) else {
+        return;
+    };
+    for (id, line) in ID_CONTROLS.into_iter().zip(settings::controls_help(hotkey, &hands_free, &cancel)) {
+        set_text(hwnd, id, &line);
     }
 }
 
@@ -270,6 +298,7 @@ fn save(hwnd: HWND) {
         if selection(hwnd, ID_INSERT) == Some(1) { InsertMethod::Type } else { InsertMethod::Paste };
     config.restore_clipboard = checked(hwnd, ID_RESTORE);
     config.remove_fillers = checked(hwnd, ID_FILLERS);
+    config.remove_stutters = checked(hwnd, ID_STUTTERS);
     config.voice_commands = checked(hwnd, ID_COMMANDS);
     config.trailing_space = checked(hwnd, ID_SPACE);
     config.vocabulary = settings::parse_vocabulary(&text(hwnd, ID_VOCABULARY));
@@ -377,7 +406,7 @@ pub(super) fn selection(hwnd: HWND, id: i32) -> Option<usize> {
 
 /// The layout, in dialog units (they scale with the font and the display's DPI).
 fn template() -> Vec<u32> {
-    let mut t = Template::new(TITLE, 440, 227);
+    let mut t = Template::new(TITLE, 440, 306);
 
     t.group("Dictation", (7, 7, 206, 94));
     t.label("&Hotkey:", (14, 21, 56, 8));
@@ -388,27 +417,34 @@ fn template() -> Vec<u32> {
     t.check(ID_SOUNDS, "Play a sound when recording starts and stops", (14, 70, 192, 10));
     t.check(ID_AUTOSTART, "Start with Windows", (14, 84, 192, 10));
 
-    t.group("Text", (7, 108, 206, 89));
+    t.group("Text", (7, 108, 206, 103));
     t.label("&Insert text by:", (14, 122, 56, 8));
     t.combo(ID_INSERT, CBS_DROPDOWNLIST, (74, 120, 132, 60));
     t.check(ID_RESTORE, "Put the clipboard back after pasting", (14, 139, 192, 10));
     t.check(ID_FILLERS, "Remove filler words (um, uh)", (14, 153, 192, 10));
-    t.check(ID_COMMANDS, "Voice commands: “new line”, “new paragraph”", (14, 167, 192, 10));
-    t.check(ID_SPACE, "Add a space after each dictation", (14, 181, 192, 10));
+    t.check(ID_STUTTERS, "Remove stutters (“I I I want” → “I want”)", (14, 167, 192, 10));
+    t.check(ID_COMMANDS, "Voice commands: “new line”, “new paragraph”", (14, 181, 192, 10));
+    t.check(ID_SPACE, "Add a space after each dictation", (14, 195, 192, 10));
 
-    t.group("Vocabulary", (220, 7, 213, 190));
+    t.group("Vocabulary", (220, 7, 213, 204));
     t.label(
         "&Words and names recognition tends to get wrong, one per line, spelled the way you want them:",
         (227, 19, 199, 16),
     );
     t.edit(ID_VOCABULARY, (227, 37, 199, 79));
     t.label("&Replacements for anything else, one per line:  heard = written", (227, 123, 199, 8));
-    t.edit(ID_REPLACEMENTS, (227, 134, 199, 56));
+    t.edit(ID_REPLACEMENTS, (227, 134, 199, 70));
 
-    t.button(ID_OPEN_FILE, "&Open config file", (7, 206, 70, 14), false);
-    t.label("Saving restarts Dictum to apply the changes.", (84, 209, 200, 8));
-    t.button(IDOK, "Save", (329, 206, 50, 14), true);
-    t.button(IDCANCEL, "Cancel", (383, 206, 50, 14), false);
+    t.group("Controls", (7, 218, 426, 58));
+    for (id, y) in ID_CONTROLS.into_iter().zip([231, 242, 253]) {
+        t.text(id, "", (14, y, 412, 8));
+    }
+    t.label("The hands-free and cancel keys can be changed in the config file.", (14, 264, 412, 8));
+
+    t.button(ID_OPEN_FILE, "&Open config file", (7, 285, 70, 14), false);
+    t.label("Saving restarts Dictum to apply the changes.", (84, 288, 200, 8));
+    t.button(IDOK, "Save", (329, 285, 50, 14), true);
+    t.button(IDCANCEL, "Cancel", (383, 285, 50, 14), false);
     t.finish()
 }
 
@@ -446,7 +482,12 @@ impl Template {
     }
 
     fn label(&mut self, text: &str, rect: Rect) {
-        self.item(Self::STATIC, text, -1, 0, 0, rect);
+        self.text(-1, text, rect);
+    }
+
+    /// A label the code fills in or changes later.
+    fn text(&mut self, id: i32, text: &str, rect: Rect) {
+        self.item(Self::STATIC, text, id, 0, 0, rect);
     }
 
     fn combo(&mut self, id: i32, style: i32, rect: Rect) {

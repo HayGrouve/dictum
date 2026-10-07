@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 
 use anyhow::{Context, Result, bail};
 
-use crate::hotkey::Hotkey;
+use crate::hotkey::{self, Hotkey};
 
 /// Offered in the hotkey drop-down; any other spec can still be typed in.
 pub const HOTKEY_PRESETS: [&str; 5] = ["ctrl+win", "right_ctrl", "right_alt", "ctrl+shift+space", "f13"];
@@ -13,6 +13,20 @@ pub const HOTKEY_PRESETS: [&str; 5] = ["ctrl+win", "right_ctrl", "right_alt", "c
 /// How a hotkey spec is shown: `right_ctrl` → `Right Ctrl`. Invalid specs are shown as written.
 pub fn hotkey_label(spec: &str) -> String {
     Hotkey::parse(spec).map_or_else(|_| spec.to_string(), |h| h.to_string())
+}
+
+/// The "Controls" lines: how to dictate, go hands-free and cancel with the configured keys.
+pub fn controls_help(hotkey: &str, hands_free_key: &str, cancel_key: &str) -> [String; 3] {
+    let key = |spec: &str| hotkey::parse_key(spec).map_or_else(|_| spec.to_string(), hotkey::key_name);
+    let hotkey = hotkey_label(hotkey);
+    [
+        format!("Hold {hotkey} and speak; release to insert the text."),
+        format!(
+            "While holding, tap {} to keep recording hands-free; press {hotkey} again to finish.",
+            key(hands_free_key)
+        ),
+        format!("Press {} while recording to discard it.", key(cancel_key)),
+    ]
 }
 
 /// Reads the hotkey field back into a spec. `current` is kept as written when the field still
@@ -115,6 +129,16 @@ mod tests {
         assert_eq!(hotkey_spec("control+super", "f13").unwrap(), "ctrl+win");
         assert!(hotkey_spec("ctrl+banana", "ctrl+win").is_err());
         assert!(hotkey_spec("", "ctrl+win").is_err());
+    }
+
+    #[test]
+    fn controls_help_names_the_keys() {
+        let [hold, hands_free, cancel] = controls_help("right_ctrl", "space", "escape");
+        assert_eq!(hold, "Hold Right Ctrl and speak; release to insert the text.");
+        assert!(hands_free.contains("tap Space") && hands_free.contains("press Right Ctrl again"));
+        assert_eq!(cancel, "Press Esc while recording to discard it.");
+        let [_, hands_free, _] = controls_help("ctrl+shift+space", "f9", "esc");
+        assert!(hands_free.contains("tap F9") && hands_free.contains("press Ctrl+Shift+Space again"));
     }
 
     #[test]

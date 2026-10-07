@@ -44,6 +44,7 @@ pub struct Config {
     pub restore_clipboard: bool,
     pub trailing_space: bool,
     pub remove_fillers: bool,
+    pub remove_stutters: bool,
     pub voice_commands: bool,
     pub sounds: bool,
     pub indicator: bool,
@@ -66,6 +67,7 @@ impl Default for Config {
             restore_clipboard: true,
             trailing_space: true,
             remove_fillers: true,
+            remove_stutters: true,
             voice_commands: false,
             sounds: true,
             indicator: true,
@@ -99,6 +101,7 @@ impl Config {
     pub fn text_options(&self) -> dictum_engine::text::TextOptions {
         dictum_engine::text::TextOptions {
             remove_fillers: self.remove_fillers,
+            remove_stutters: self.remove_stutters,
             voice_commands: self.voice_commands,
             vocabulary: self.vocabulary.clone(),
             replacements: self.replacements.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
@@ -176,6 +179,7 @@ fn edit(text: &str, from: &Config, to: &Config) -> Result<String> {
     set("restore_clipboard", from.restore_clipboard != to.restore_clipboard, to.restore_clipboard.into());
     set("trailing_space", from.trailing_space != to.trailing_space, to.trailing_space.into());
     set("remove_fillers", from.remove_fillers != to.remove_fillers, to.remove_fillers.into());
+    set("remove_stutters", from.remove_stutters != to.remove_stutters, to.remove_stutters.into());
     set("voice_commands", from.voice_commands != to.voice_commands, to.voice_commands.into());
     set("sounds", from.sounds != to.sounds, to.sounds.into());
     set("indicator", from.indicator != to.indicator, to.indicator.into());
@@ -250,6 +254,9 @@ trailing_space = true
 
 # Drop hesitations like "um" and "uh".
 remove_fillers = true
+
+# Drop stuttered repeats: "I I I want to" -> "I want to", "w- want" -> "want".
+remove_stutters = true
 
 # Say "new line" or "new paragraph" to insert line breaks.
 voice_commands = false

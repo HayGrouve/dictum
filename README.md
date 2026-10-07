@@ -31,9 +31,9 @@ On first launch Dictum downloads the speech model (~670 MB, checksum-verified, r
 ## Settings
 
 Tray → *Settings…* opens a window with the settings you're likely to change: hotkey, microphone,
-the on-screen indicator, sounds, *Start with Windows*, how text is inserted, filler-word removal, voice commands, trailing
-space, vocabulary and replacements. *Save* writes them to the config file and restarts Dictum to
-apply them.
+the on-screen indicator, sounds, *Start with Windows*, how text is inserted, filler-word and
+stutter removal, voice commands, trailing space, vocabulary and replacements, plus a reminder of
+the controls above. *Save* writes them to the config file and restarts Dictum to apply them.
 
 Everything is stored in `%APPDATA%\Dictum\config.toml`, created on first run with every option
 documented (the settings window keeps your comments and formatting). Highlights:
@@ -42,6 +42,9 @@ documented (the settings window keeps your comments and formatting). Highlights:
 - `insert_method` — `"paste"` (default; restores your clipboard afterwards and keeps dictated
   text out of clipboard history) or `"type"` (never touches the clipboard)
 - `remove_fillers`, `voice_commands` ("new line" / "new paragraph"), `trailing_space`
+- `remove_stutters` — "I I I want to" → "I want to", "w- want" → "want"; words people double on
+  purpose ("had had", "very very") are kept
+- `hands_free_key`, `cancel_key` — `"space"` and `"escape"` by default
 - `vocabulary` — terms speech recognition tends to get wrong, written the way you want them, e.g.
   `["Claude Code", "Vercel", "shadcn", "TanStack", "Convex", "pnpm"]`. Recognition favours them
   when the audio is ambiguous (inside the decoder, not by guessing afterwards), and near misses

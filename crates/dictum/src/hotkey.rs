@@ -153,7 +153,7 @@ pub fn parse_key(name: &str) -> Result<Key> {
     })
 }
 
-fn key_name(key: Key) -> String {
+pub fn key_name(key: Key) -> String {
     match key {
         Key::LCtrl => "Left Ctrl".into(),
         Key::RCtrl => "Right Ctrl".into(),
