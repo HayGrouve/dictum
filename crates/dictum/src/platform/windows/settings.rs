@@ -26,8 +26,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 
 use super::{autostart, wide};
-use crate::config::{self, Config, InsertMethod};
-use crate::settings;
+use crate::config::Config;
+use crate::settings::{self, Control, Field, Form, Section, Value};
 
 pub(super) const ID_HOTKEY: i32 = 100;
 pub(super) const ID_MICROPHONE: i32 = 101;
@@ -49,16 +49,33 @@ pub(super) const ID_CONTROLS: [i32; 3] = [114, 115, 116];
 /// Posted by the thread that lists the microphones.
 const WM_MICROPHONES: u32 = WM_APP + 10;
 
-const TITLE: &str = "Dictum settings";
+/// The control of each field. Every field must be placed in [`template`] too.
+fn id(field: Field) -> i32 {
+    match field {
+        Field::Hotkey => ID_HOTKEY,
+        Field::Microphone => ID_MICROPHONE,
+        Field::Indicator => ID_INDICATOR,
+        Field::Sounds => ID_SOUNDS,
+        Field::Autostart => ID_AUTOSTART,
+        Field::InsertMethod => ID_INSERT,
+        Field::RestoreClipboard => ID_RESTORE,
+        Field::RemoveFillers => ID_FILLERS,
+        Field::RemoveStutters => ID_STUTTERS,
+        Field::VoiceCommands => ID_COMMANDS,
+        Field::TrailingSpace => ID_SPACE,
+        Field::Vocabulary => ID_VOCABULARY,
+        Field::Replacements => ID_REPLACEMENTS,
+    }
+}
+
+fn fields() -> impl Iterator<Item = Field> {
+    Section::ALL.into_iter().flat_map(|s| s.fields().iter().copied())
+}
 
 struct Dialog {
     hwnd: HWND,
     config_file: PathBuf,
-    /// The file's settings when the window opened: only fields that differ get written.
-    original: Config,
-    autostart: bool,
-    /// The `microphone` setting behind each drop-down entry.
-    microphones: Vec<String>,
+    form: Form,
     found_microphones: Arc<Mutex<Option<Vec<String>>>>,
 }
 
@@ -85,14 +102,11 @@ pub fn open(config_file: &Path) {
             return;
         }
     };
-    let (choices, _) = settings::microphone_choices(&original.microphone, None);
     DIALOG.with(|d| {
         *d.borrow_mut() = Some(Dialog {
             hwnd: std::ptr::null_mut(),
             config_file: config_file.to_path_buf(),
-            original,
-            autostart: autostart::is_enabled(),
-            microphones: choices.into_iter().map(|(_, setting)| setting).collect(),
+            form: Form::new(original, autostart::is_enabled()),
             found_microphones: Arc::default(),
         })
     });
@@ -160,9 +174,9 @@ unsafe extern "system" fn dialog_proc(hwnd: HWND, msg: u32, wparam: WPARAM, _lpa
             1
         }
         WM_COMMAND => {
-            let id = (wparam & 0xFFFF) as i32;
+            let control = (wparam & 0xFFFF) as i32;
             let code = ((wparam >> 16) & 0xFFFF) as u32;
-            match (id, code) {
+            match (control, code) {
                 (IDOK, BN_CLICKED) => save(hwnd),
                 (IDCANCEL, BN_CLICKED) => unsafe {
                     DestroyWindow(hwnd);
@@ -172,15 +186,16 @@ unsafe extern "system" fn dialog_proc(hwnd: HWND, msg: u32, wparam: WPARAM, _lpa
                         super::open(&path);
                     }
                 }
-                (ID_INSERT, CBN_SELCHANGE) => update_restore_enabled(hwnd),
                 // The edit text isn't updated yet when the selection changes: use the preset.
                 (ID_HOTKEY, CBN_SELCHANGE) => {
                     let preset = selection(hwnd, ID_HOTKEY).and_then(|i| settings::HOTKEY_PRESETS.get(i));
                     if let Some(preset) = preset {
-                        show_controls(hwnd, preset);
+                        refresh(hwnd, Some(&settings::hotkey_label(preset)));
                     }
                 }
-                (ID_HOTKEY, CBN_EDITCHANGE) => show_controls(hwnd, &text(hwnd, ID_HOTKEY)),
+                (_, CBN_SELCHANGE | CBN_EDITCHANGE | BN_CLICKED) if fields().any(|f| id(f) == control) => {
+                    refresh(hwnd, None)
+                }
                 _ => return 0,
             }
             1
@@ -194,40 +209,22 @@ unsafe extern "system" fn dialog_proc(hwnd: HWND, msg: u32, wparam: WPARAM, _lpa
 }
 
 fn init(hwnd: HWND) {
-    let Some((config, autostart, found)) = DIALOG.with(|d| {
-        d.borrow().as_ref().map(|d| (d.original.clone(), d.autostart, d.found_microphones.clone()))
+    let Some((initial, found)) = DIALOG.with(|d| {
+        d.borrow().as_ref().map(|d| {
+            let initial: Vec<_> = fields().map(|f| (f, d.form.options(f), d.form.initial(f))).collect();
+            (initial, d.found_microphones.clone())
+        })
     }) else {
         return;
     };
     set_icons(hwnd);
-
-    let presets: Vec<String> =
-        settings::HOTKEY_PRESETS.iter().map(|spec| settings::hotkey_label(spec)).collect();
-    fill_combo(hwnd, ID_HOTKEY, &presets, None);
-    set_text(hwnd, ID_HOTKEY, &settings::hotkey_label(&config.hotkey));
-    let (choices, selected) = settings::microphone_choices(&config.microphone, None);
-    let labels: Vec<String> = choices.into_iter().map(|(label, _)| label).collect();
-    fill_combo(hwnd, ID_MICROPHONE, &labels, Some(selected));
-    check(hwnd, ID_INDICATOR, config.indicator);
-    check(hwnd, ID_SOUNDS, config.sounds);
-    check(hwnd, ID_AUTOSTART, autostart);
-
-    let methods = ["Pasting (fast; your clipboard is kept)", "Typing (never touches the clipboard)"];
-    let methods: Vec<String> = methods.map(String::from).to_vec();
-    let method = match config.insert_method {
-        InsertMethod::Paste => 0,
-        InsertMethod::Type => 1,
-    };
-    fill_combo(hwnd, ID_INSERT, &methods, Some(method));
-    check(hwnd, ID_RESTORE, config.restore_clipboard);
-    update_restore_enabled(hwnd);
-    check(hwnd, ID_FILLERS, config.remove_fillers);
-    check(hwnd, ID_STUTTERS, config.remove_stutters);
-    check(hwnd, ID_COMMANDS, config.voice_commands);
-    check(hwnd, ID_SPACE, config.trailing_space);
-    set_text(hwnd, ID_VOCABULARY, &settings::vocabulary_text(&config.vocabulary));
-    set_text(hwnd, ID_REPLACEMENTS, &settings::replacements_text(&config.replacements));
-    show_controls(hwnd, &config.hotkey);
+    for (field, options, value) in initial {
+        if let Control::Choice { .. } = field.control() {
+            fill_combo(hwnd, id(field), &options, None);
+        }
+        show(hwnd, field, &value);
+    }
+    refresh(hwnd, None);
 
     // Listing devices can take a moment: keep it off the thread that runs the keyboard hook.
     let target = hwnd as usize;
@@ -237,100 +234,76 @@ fn init(hwnd: HWND) {
     });
 }
 
+/// What a field's control holds.
+fn value(hwnd: HWND, field: Field) -> Value {
+    match field.control() {
+        Control::Choice { editable: true, .. } | Control::Lines { .. } => Value::Text(text(hwnd, id(field))),
+        Control::Choice { editable: false, .. } => Value::Choice(selection(hwnd, id(field))),
+        Control::Check { .. } => Value::Check(checked(hwnd, id(field))),
+    }
+}
+
+fn show(hwnd: HWND, field: Field, value: &Value) {
+    match value {
+        Value::Text(text) => set_text(hwnd, id(field), text),
+        Value::Choice(selected) => {
+            let index = selected.unwrap_or(usize::MAX); // CB_SETCURSEL with -1 clears it
+            unsafe { SendDlgItemMessageW(hwnd, id(field), CB_SETCURSEL, index, 0) };
+        }
+        Value::Check(on) => check(hwnd, id(field), *on),
+    }
+}
+
 fn show_microphones(hwnd: HWND) {
     let selected = selection(hwnd, ID_MICROPHONE);
     let update = DIALOG.with(|d| {
         let mut d = d.borrow_mut();
         let dialog = d.as_mut()?;
         let devices = dialog.found_microphones.lock().unwrap().take()?;
-        let current = selected.and_then(|i| dialog.microphones.get(i)).cloned().unwrap_or_default();
-        let (choices, selected) = settings::microphone_choices(&current, Some(&devices));
-        let (labels, values): (Vec<String>, Vec<String>) = choices.into_iter().unzip();
-        dialog.microphones = values;
-        Some((labels, selected))
+        Some(dialog.form.devices_found(&devices, selected))
     });
     if let Some((labels, selected)) = update {
         fill_combo(hwnd, ID_MICROPHONE, &labels, Some(selected));
     }
 }
 
-/// Explains the controls with `hotkey`; a hotkey that is still being typed leaves them as they are.
-fn show_controls(hwnd: HWND, hotkey: &str) {
-    if crate::hotkey::Hotkey::parse(hotkey).is_err() {
-        return;
+/// Updates what depends on other fields: which can be changed, and the "Controls" lines (left as
+/// they are while the hotkey is still being typed). `hotkey` stands in for the hotkey field's
+/// text, which isn't updated yet while its selection changes.
+fn refresh(hwnd: HWND, hotkey: Option<&str>) {
+    for field in fields() {
+        let enabled = Form::enabled(field, |f| value(hwnd, f));
+        unsafe { EnableWindow(GetDlgItem(hwnd, id(field)), enabled.into()) };
     }
-    let Some((hands_free, cancel)) = DIALOG.with(|d| {
-        d.borrow().as_ref().map(|d| (d.original.hands_free_key.clone(), d.original.cancel_key.clone()))
-    }) else {
-        return;
-    };
-    for (id, line) in ID_CONTROLS.into_iter().zip(settings::controls_help(hotkey, &hands_free, &cancel)) {
+    let hotkey = hotkey.map_or_else(|| text(hwnd, ID_HOTKEY), String::from);
+    let lines = DIALOG.with(|d| d.borrow().as_ref().and_then(|d| d.form.controls(&hotkey)));
+    for (id, line) in ID_CONTROLS.into_iter().zip(lines.into_iter().flatten()) {
         set_text(hwnd, id, &line);
     }
 }
 
-fn update_restore_enabled(hwnd: HWND) {
-    let paste = selection(hwnd, ID_INSERT) == Some(0);
-    unsafe { EnableWindow(GetDlgItem(hwnd, ID_RESTORE), paste.into()) };
-}
-
 fn save(hwnd: HWND) {
-    let Some((path, original, autostart_was, microphones)) = DIALOG.with(|d| {
-        d.borrow()
-            .as_ref()
-            .map(|d| (d.config_file.clone(), d.original.clone(), d.autostart, d.microphones.clone()))
-    }) else {
-        return;
-    };
-    let mut config = original.clone();
-    config.hotkey = match settings::hotkey_spec(&text(hwnd, ID_HOTKEY), &original.hotkey) {
-        Ok(spec) => spec,
-        Err(e) => {
-            let hint = "Pick one from the list, or type keys joined by “+”, like ctrl+shift+space.";
-            return complain(hwnd, ID_HOTKEY, &format!("{e:#}\n\n{hint}"));
+    // Read the controls before borrowing `DIALOG`: no borrow may be held while messages are sent.
+    let values: Vec<(Field, Value)> = fields().map(|f| (f, value(hwnd, f))).collect();
+    let value = |field: Field| values.iter().find(|(f, _)| *f == field).map(|(_, v)| v.clone()).unwrap();
+    let saved = DIALOG.with(|d| {
+        let mut d = d.borrow_mut();
+        let dialog = d.as_mut()?;
+        Some(
+            dialog
+                .form
+                .read(value)
+                .and_then(|changes| dialog.form.save(&dialog.config_file, &changes, autostart::set)),
+        )
+    });
+    match saved {
+        None => {}
+        Some(Err(problem)) => complain(hwnd, problem.field.map_or(IDOK, id), &problem.message),
+        Some(Ok(restart)) => {
+            SAVED.with(|s| s.set(Some(restart)));
+            unsafe { DestroyWindow(hwnd) };
         }
-    };
-    config.microphone =
-        selection(hwnd, ID_MICROPHONE).and_then(|i| microphones.get(i)).cloned().unwrap_or_default();
-    config.indicator = checked(hwnd, ID_INDICATOR);
-    config.sounds = checked(hwnd, ID_SOUNDS);
-    config.insert_method =
-        if selection(hwnd, ID_INSERT) == Some(1) { InsertMethod::Type } else { InsertMethod::Paste };
-    config.restore_clipboard = checked(hwnd, ID_RESTORE);
-    config.remove_fillers = checked(hwnd, ID_FILLERS);
-    config.remove_stutters = checked(hwnd, ID_STUTTERS);
-    config.voice_commands = checked(hwnd, ID_COMMANDS);
-    config.trailing_space = checked(hwnd, ID_SPACE);
-    config.vocabulary = settings::parse_vocabulary(&text(hwnd, ID_VOCABULARY));
-    config.replacements = match settings::parse_replacements(&text(hwnd, ID_REPLACEMENTS)) {
-        Ok(replacements) => replacements,
-        Err(e) => return complain(hwnd, ID_REPLACEMENTS, &format!("{e:#}")),
-    };
-
-    let autostart = checked(hwnd, ID_AUTOSTART);
-    if autostart != autostart_was {
-        if let Err(e) = autostart::set(autostart) {
-            log::error!("{e:#}");
-            return complain(hwnd, ID_AUTOSTART, &format!("Could not change “Start with Windows”: {e:#}"));
-        }
-        DIALOG.with(|d| {
-            if let Some(dialog) = d.borrow_mut().as_mut() {
-                dialog.autostart = autostart;
-            }
-        });
     }
-    let restart = match config::save_changes(&path, &original, &config) {
-        Ok(changed) => changed,
-        Err(e) => {
-            log::error!("{e:#}");
-            return complain(hwnd, IDOK, &format!("Could not save the settings: {e:#}"));
-        }
-    };
-    if restart {
-        log::info!("settings saved");
-    }
-    SAVED.with(|s| s.set(Some(restart)));
-    unsafe { DestroyWindow(hwnd) };
 }
 
 /// Explains what's wrong and puts the cursor on the field to fix.
@@ -406,46 +379,65 @@ pub(super) fn selection(hwnd: HWND, id: i32) -> Option<usize> {
 
 /// The layout, in dialog units (they scale with the font and the display's DPI).
 fn template() -> Vec<u32> {
-    let mut t = Template::new(TITLE, 440, 306);
+    let mut t = Template::new(settings::TITLE, 440, 306);
 
-    t.group("Dictation", (7, 7, 206, 94));
-    t.label("&Hotkey:", (14, 21, 56, 8));
-    t.combo(ID_HOTKEY, CBS_DROPDOWN | CBS_AUTOHSCROLL, (74, 19, 132, 100));
-    t.label("&Microphone:", (14, 39, 56, 8));
-    t.combo(ID_MICROPHONE, CBS_DROPDOWNLIST, (74, 37, 132, 120));
-    t.check(ID_INDICATOR, "Show an indicator on screen while dictating", (14, 56, 192, 10));
-    t.check(ID_SOUNDS, "Play a sound when recording starts and stops", (14, 70, 192, 10));
-    t.check(ID_AUTOSTART, "Start with Windows", (14, 84, 192, 10));
+    for section in Section::ALL {
+        let group = match section {
+            Section::Dictation => (7, 7, 206, 94),
+            Section::Text => (7, 108, 206, 103),
+            Section::Vocabulary => (220, 7, 213, 204),
+        };
+        t.group(section.title(), group);
+        for &field in section.fields() {
+            let (label, control) = place(field);
+            match field.control() {
+                Control::Choice { label: text, editable } => {
+                    t.label(text, label);
+                    let style = if editable { CBS_DROPDOWN | CBS_AUTOHSCROLL } else { CBS_DROPDOWNLIST };
+                    t.combo(id(field), style, control);
+                }
+                Control::Check { label: text } => t.check(id(field), text, control),
+                Control::Lines { label: text } => {
+                    t.label(text, label);
+                    t.edit(id(field), control);
+                }
+            }
+        }
+    }
 
-    t.group("Text", (7, 108, 206, 103));
-    t.label("&Insert text by:", (14, 122, 56, 8));
-    t.combo(ID_INSERT, CBS_DROPDOWNLIST, (74, 120, 132, 60));
-    t.check(ID_RESTORE, "Put the clipboard back after pasting", (14, 139, 192, 10));
-    t.check(ID_FILLERS, "Remove filler words (um, uh)", (14, 153, 192, 10));
-    t.check(ID_STUTTERS, "Remove stutters (“I I I want” → “I want”)", (14, 167, 192, 10));
-    t.check(ID_COMMANDS, "Voice commands: “new line”, “new paragraph”", (14, 181, 192, 10));
-    t.check(ID_SPACE, "Add a space after each dictation", (14, 195, 192, 10));
-
-    t.group("Vocabulary", (220, 7, 213, 204));
-    t.label(
-        "&Words and names recognition tends to get wrong, one per line, spelled the way you want them:",
-        (227, 19, 199, 16),
-    );
-    t.edit(ID_VOCABULARY, (227, 37, 199, 79));
-    t.label("&Replacements for anything else, one per line:  heard = written", (227, 123, 199, 8));
-    t.edit(ID_REPLACEMENTS, (227, 134, 199, 70));
-
-    t.group("Controls", (7, 218, 426, 58));
+    t.group(settings::CONTROLS_TITLE, (7, 218, 426, 58));
     for (id, y) in ID_CONTROLS.into_iter().zip([231, 242, 253]) {
         t.text(id, "", (14, y, 412, 8));
     }
-    t.label("The hands-free and cancel keys can be changed in the config file.", (14, 264, 412, 8));
+    t.label(settings::CONTROLS_NOTE, (14, 264, 412, 8));
 
-    t.button(ID_OPEN_FILE, "&Open config file", (7, 285, 70, 14), false);
-    t.label("Saving restarts Dictum to apply the changes.", (84, 288, 200, 8));
-    t.button(IDOK, "Save", (329, 285, 50, 14), true);
-    t.button(IDCANCEL, "Cancel", (383, 285, 50, 14), false);
+    t.button(ID_OPEN_FILE, settings::OPEN_FILE, (7, 285, 70, 14), false);
+    t.label(settings::SAVE_NOTE, (84, 288, 200, 8));
+    t.button(IDOK, settings::SAVE, (329, 285, 50, 14), true);
+    t.button(IDCANCEL, settings::CANCEL, (383, 285, 50, 14), false);
     t.finish()
+}
+
+/// Where each field goes: its label and its control. Checkboxes carry their own text, so their
+/// label rectangle is unused.
+fn place(field: Field) -> (Rect, Rect) {
+    let check = |y| ((0, 0, 0, 0), (14, y, 192, 10));
+    let choice = |y, drop_down| ((14, y + 2, 56, 8), (74, y, 132, drop_down));
+    match field {
+        Field::Hotkey => choice(19, 100),
+        Field::Microphone => choice(37, 120),
+        Field::Indicator => check(56),
+        Field::Sounds => check(70),
+        Field::Autostart => check(84),
+        Field::InsertMethod => choice(120, 60),
+        Field::RestoreClipboard => check(139),
+        Field::RemoveFillers => check(153),
+        Field::RemoveStutters => check(167),
+        Field::VoiceCommands => check(181),
+        Field::TrailingSpace => check(195),
+        Field::Vocabulary => ((227, 19, 199, 16), (227, 37, 199, 79)),
+        Field::Replacements => ((227, 123, 199, 8), (227, 134, 199, 70)),
+    }
 }
 
 type Rect = (i16, i16, i16, i16);
