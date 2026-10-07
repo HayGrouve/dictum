@@ -70,6 +70,7 @@ pub fn run() -> Result<()> {
         return Ok(());
     };
     std::panic::set_hook(Box::new(|info| log::error!("panic: {info}")));
+    remove_update_leftovers();
 
     let (config, config_error) = match Config::load_or_create(&paths.config_file) {
         Ok(c) => (c, None),
@@ -194,6 +195,22 @@ pub fn run() -> Result<()> {
         log::info!("quitting");
     }
     Ok(())
+}
+
+/// The previous version's files can stay locked for a moment after an update restart.
+fn remove_update_leftovers() {
+    let Some(dir) = std::env::current_exe().ok().and_then(|exe| exe.parent().map(|d| d.to_path_buf())) else {
+        return;
+    };
+    spawn("cleanup", move || {
+        for _ in 0..30 {
+            if crate::update::remove_leftovers(&dir) == 0 {
+                return;
+            }
+            std::thread::sleep(Duration::from_secs(1));
+        }
+        log::warn!("could not remove files left by the last update in {}", dir.display());
+    });
 }
 
 fn spawn(name: &str, f: impl FnOnce() + Send + 'static) {

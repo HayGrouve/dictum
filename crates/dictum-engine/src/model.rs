@@ -162,6 +162,17 @@ fn download_file(
     Ok(())
 }
 
+/// Fetches a small resource (at most `limit` bytes) over HTTPS with the OS certificate store.
+pub fn http_get(url: &str, accept: &str, limit: u64) -> Result<Vec<u8>> {
+    let mut response = agent()
+        .get(url)
+        .header("Accept", accept)
+        .header("User-Agent", concat!("Dictum/", env!("CARGO_PKG_VERSION")))
+        .call()
+        .with_context(|| format!("request to {url} failed"))?;
+    Ok(response.body_mut().with_config().limit(limit).read_to_vec()?)
+}
+
 fn agent() -> ureq::Agent {
     #[cfg(any(windows, target_os = "macos"))]
     let tls = ureq::tls::TlsConfig::builder()
