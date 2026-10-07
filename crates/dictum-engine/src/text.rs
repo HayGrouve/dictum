@@ -6,6 +6,9 @@ pub struct TextOptions {
     pub remove_fillers: bool,
     /// Turn spoken "new line" / "new paragraph" into line breaks.
     pub voice_commands: bool,
+    /// Terms to write exactly as listed ("next.js", "turbo repo", "Shadn" -> "Next.js",
+    /// "Turborepo", "shadcn"). The same list boosts recognition in the engine.
+    pub vocabulary: Vec<String>,
     /// Case-insensitive whole-phrase replacements, applied in order (personal dictionary).
     pub replacements: Vec<(String, String)>,
 }
@@ -35,6 +38,9 @@ pub fn process(text: &str, options: &TextOptions) -> String {
     }
     if options.voice_commands {
         text = apply_voice_commands(&text);
+    }
+    if !options.vocabulary.is_empty() {
+        text = apply_vocabulary(&text, &options.vocabulary);
     }
     for (from, to) in &options.replacements {
         text = replace_phrase(&text, from, to);
@@ -90,6 +96,92 @@ fn remove_fillers(text: &str) -> String {
         }
     }
     out.join(" ")
+}
+
+/// Longest run of words considered for one vocabulary term ("p n p m" -> "pnpm").
+const MAX_TERM_WORDS: usize = 6;
+/// Terms at least this long (letters and digits) also match with one letter missing or extra
+/// inside the word ("Shadn" -> "shadcn").
+const FUZZY_MIN_LEN: usize = 6;
+
+/// Rewrites vocabulary terms the way they are listed. A run of words matches a term when their
+/// letters and digits agree ignoring case, spaces and punctuation, or for long terms, when they
+/// differ by one letter inserted or dropped inside the word.
+fn apply_vocabulary(text: &str, vocabulary: &[String]) -> String {
+    let terms: Vec<(&str, Vec<char>)> = vocabulary
+        .iter()
+        .map(|t| t.trim())
+        .map(|t| (t, compact(t)))
+        .filter(|(_, key)| !key.is_empty())
+        .collect();
+    let words: Vec<&str> = text.split(' ').collect();
+    let mut out: Vec<String> = Vec::with_capacity(words.len());
+    let mut i = 0;
+    while i < words.len() {
+        match match_term(&words[i..], &terms) {
+            Some((n, term, possessive)) => {
+                let (first, last) = (split_word(words[i]), split_word(words[i + n - 1]));
+                out.push(format!("{}{term}{possessive}{}", first.lead, last.trail));
+                i += n;
+            }
+            None => {
+                out.push(words[i].to_string());
+                i += 1;
+            }
+        }
+    }
+    out.join(" ")
+}
+
+/// Finds the longest run of words at the start of `words` that spells a term; returns the
+/// number of words, the term and a possessive suffix to keep.
+fn match_term<'t>(words: &[&str], terms: &[(&'t str, Vec<char>)]) -> Option<(usize, &'t str, &'static str)> {
+    let mut heard = Vec::new();
+    let mut runs = Vec::new();
+    for (n, raw) in words.iter().take(MAX_TERM_WORDS).enumerate() {
+        let word = split_word(raw);
+        if word.core.is_empty() || (n > 0 && !word.lead.is_empty()) {
+            break;
+        }
+        heard.extend(compact(word.core));
+        runs.push(heard.clone());
+        if !word.trail.is_empty() {
+            break; // punctuation ends the run
+        }
+    }
+    for (n, heard) in runs.iter().enumerate().rev() {
+        let (stem, possessive) = match heard.len().checked_sub(2) {
+            Some(cut) if heard[cut..] == ['\'', 's'] => (&heard[..cut], "'s"),
+            _ => (&heard[..], ""),
+        };
+        let stem: Vec<char> = stem.iter().copied().filter(|c| c.is_alphanumeric()).collect();
+        let exact = terms.iter().find(|(_, key)| *key == stem);
+        let fuzzy =
+            || terms.iter().find(|(_, key)| key.len() >= FUZZY_MIN_LEN && one_letter_apart(key, &stem));
+        if let Some((term, _)) = exact.or_else(fuzzy) {
+            return Some((n + 1, term, possessive));
+        }
+    }
+    None
+}
+
+/// Lower-case letters and digits (plus apostrophes, to recognise possessives).
+fn compact(text: &str) -> Vec<char> {
+    text.chars()
+        .filter(|c| c.is_alphanumeric() || matches!(c, '\'' | '’'))
+        .flat_map(char::to_lowercase)
+        .map(|c| if c == '’' { '\'' } else { c })
+        .collect()
+}
+
+/// True when one is the other with a single letter inserted somewhere other than the first or
+/// last position (so plurals and other endings never match).
+fn one_letter_apart(a: &[char], b: &[char]) -> bool {
+    let (long, short) = if a.len() > b.len() { (a, b) } else { (b, a) };
+    if long.len() != short.len() + 1 || short.len() < 2 {
+        return false;
+    }
+    (1..long.len() - 1).any(|k| long[..k] == short[..k] && long[k + 1..] == short[k..])
 }
 
 fn capitalize_first(word: &str) -> String {
@@ -235,6 +327,52 @@ mod tests {
             process("I pushed dictum to get hub, not dictums.", &o),
             "I pushed Dictum to GitHub, not dictums."
         );
+    }
+
+    fn vocabulary(terms: &[&str]) -> TextOptions {
+        TextOptions { vocabulary: terms.iter().map(|t| t.to_string()).collect(), ..Default::default() }
+    }
+
+    #[test]
+    fn vocabulary_fixes_case_and_spacing() {
+        let o =
+            vocabulary(&["Next.js", "Turborepo", "subagent", "TanStack Query", "TanStack", "AI SDK", "pnpm"]);
+        assert_eq!(
+            process("Use PNPM, turbo repo and the next.js app.", &o),
+            "Use pnpm, Turborepo and the Next.js app."
+        );
+        assert_eq!(
+            process("Let the Suba Gent use TANSTACK query.", &o),
+            "Let the subagent use TanStack Query."
+        );
+        assert_eq!(
+            process("Stream it with the AISDK and TanStack.", &o),
+            "Stream it with the AI SDK and TanStack."
+        );
+    }
+
+    #[test]
+    fn vocabulary_keeps_punctuation_and_possessives() {
+        let o = vocabulary(&["Claude Code", "Vercel"]);
+        assert_eq!(process("(claude code's) docs, on VERCEL!", &o), "(Claude Code's) docs, on Vercel!");
+        // Punctuation between words breaks a match.
+        assert_eq!(process("Claude, code it.", &o), "Claude, code it.");
+    }
+
+    #[test]
+    fn vocabulary_fuzzy_match_is_narrow() {
+        let o = vocabulary(&["shadcn", "webhook", "Claude", "Convex"]);
+        assert_eq!(process("Add it from Shadn.", &o), "Add it from shadcn.");
+        // Endings, substitutions and short terms are left alone.
+        assert_eq!(process("Two webhooks, a clause, convexs.", &o), "Two webhooks, a clause, convexs.");
+        assert_eq!(process("A web hook", &o), "A webhook");
+    }
+
+    #[test]
+    fn vocabulary_does_not_touch_other_words() {
+        let o = vocabulary(&["Claude Code", "Vercel", "shadcn", "Convex", "pnpm", "Rust"]);
+        let t = "The weather today is cloudy, with a chance of rain in the evening.";
+        assert_eq!(process(t, &o), t);
     }
 
     #[test]

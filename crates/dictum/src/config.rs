@@ -41,6 +41,7 @@ pub struct Config {
     pub threads: usize,
     pub model_dir: Option<PathBuf>,
     pub max_recording_secs: u32,
+    pub vocabulary: Vec<String>,
     pub replacements: BTreeMap<String, String>,
 }
 
@@ -61,6 +62,7 @@ impl Default for Config {
             threads: 0,
             model_dir: None,
             max_recording_secs: 600,
+            vocabulary: Vec::new(),
             replacements: BTreeMap::new(),
         }
     }
@@ -86,6 +88,7 @@ impl Config {
         dictum_engine::text::TextOptions {
             remove_fillers: self.remove_fillers,
             voice_commands: self.voice_commands,
+            vocabulary: self.vocabulary.clone(),
             replacements: self.replacements.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
         }
     }
@@ -97,6 +100,7 @@ impl Config {
                 DeviceSetting::Gpu => dictum_engine::Device::Gpu,
             },
             threads: self.threads,
+            vocabulary: self.vocabulary.clone(),
         }
     }
 
@@ -170,6 +174,12 @@ threads = 0
 # Recordings stop automatically after this many seconds.
 max_recording_secs = 600
 
+# Words and names you use that speech recognition tends to get wrong, written the way you want
+# them. Recognition favours them when the audio is ambiguous, and close misses are corrected
+# ("versal" -> "Vercel", "turbo repo" -> "Turborepo"). Very short terms get a gentler nudge.
+# Example: vocabulary = ["Claude Code", "Vercel", "shadcn", "TanStack", "Convex", "pnpm"]
+vocabulary = []
+
 # Personal dictionary: "what the model hears" = "what you want".
 [replacements]
 # "get hub" = "GitHub"
@@ -188,6 +198,7 @@ mod tests {
         assert_eq!(parsed.hotkey, defaults.hotkey);
         assert_eq!(parsed.insert_method, InsertMethod::Paste);
         assert!(parsed.replacements.is_empty());
+        assert!(parsed.vocabulary.is_empty());
         assert_eq!(parsed.max_recording_secs, 600);
     }
 
@@ -197,6 +208,14 @@ mod tests {
         assert_eq!(c.hotkey, "right_ctrl");
         assert!(c.sounds);
         assert_eq!(c.text_options().replacements, vec![("get hub".to_string(), "GitHub".to_string())]);
+    }
+
+    #[test]
+    fn vocabulary_reaches_engine_and_text() {
+        let c = Config::parse("vocabulary = [\"Claude Code\", \"Vercel\"]\n").unwrap();
+        let expected = vec!["Claude Code".to_string(), "Vercel".to_string()];
+        assert_eq!(c.engine_options().vocabulary, expected);
+        assert_eq!(c.text_options().vocabulary, expected);
     }
 
     #[test]

@@ -60,6 +60,68 @@ fn transcribes_reference_set_accurately_and_fast() {
     assert!(rtf < 0.5, "inference far too slow: RTF {rtf:.3}");
 }
 
+/// Terms a web developer might add; none of them occur in the reference set.
+const DEV_VOCABULARY: &[&str] = &[
+    "Claude Code",
+    "Claude",
+    "Convex",
+    "Vercel",
+    "shadcn",
+    "TanStack Query",
+    "TanStack",
+    "Clerk",
+    "Next.js",
+    "subagent",
+    "MCP",
+    "pnpm",
+    "Turborepo",
+    "AI SDK",
+    "tsc",
+    "ESLint",
+    "GitHub",
+    "Opus",
+    "Sonnet",
+    "Haiku",
+    "diff",
+    "Tailwind",
+    "React",
+    "TypeScript",
+    "Zod",
+    "tRPC",
+    "Drizzle",
+    "Supabase",
+    "Vite",
+    "LLM",
+    "RAG",
+    "API",
+    "OAuth",
+    "webhook",
+    "JSON",
+    "npm",
+    "WSL",
+    "Rust",
+    "cargo",
+];
+
+#[test]
+fn vocabulary_does_not_change_ordinary_speech() {
+    let Some(mut plain) = engine() else { return };
+    let ids: Vec<String> = references().into_iter().map(|(id, _)| id).collect();
+    let audio: Vec<Vec<f32>> = ids.iter().map(|id| load_audio(&audio_path(id))).collect();
+    let expected: Vec<String> = audio.iter().map(|a| plain.transcribe(a).unwrap().text).collect();
+    drop(plain);
+
+    let options = EngineOptions {
+        vocabulary: DEV_VOCABULARY.iter().map(|t| t.to_string()).collect(),
+        ..Default::default()
+    };
+    let mut boosted = Parakeet::load(&model_dir().unwrap(), &options).expect("load model");
+    for ((id, audio), expected) in ids.iter().zip(&audio).zip(&expected) {
+        let text = boosted.transcribe(audio).unwrap().text;
+        assert_eq!(&text, expected, "{id}: vocabulary changed the transcript");
+    }
+}
+
 struct Dictation {
     text: String,
     early_segments: usize,

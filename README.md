@@ -30,7 +30,13 @@ On first launch Dictum downloads the speech model (~670 MB, checksum-verified, r
 - `insert_method` — `"paste"` (default; restores your clipboard afterwards and keeps dictated
   text out of clipboard history) or `"type"` (never touches the clipboard)
 - `remove_fillers`, `voice_commands` ("new line" / "new paragraph"), `trailing_space`
-- `[replacements]` — a personal dictionary, e.g. `"get hub" = "GitHub"`
+- `vocabulary` — terms speech recognition tends to get wrong, written the way you want them, e.g.
+  `["Claude Code", "Vercel", "shadcn", "TanStack", "Convex", "pnpm"]`. Recognition favours them
+  when the audio is ambiguous (inside the decoder, not by guessing afterwards), and near misses
+  are corrected: "Shadn" → shadcn, "turbo repo" → Turborepo, "next.js" → Next.js. A long list
+  doesn't change ordinary speech; see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+- `[replacements]` — a personal dictionary for anything `vocabulary` doesn't catch, e.g.
+  `"versal" = "Vercel"`
 - `device = "gpu"` — *experimental*: DirectML (any DX12 GPU) for the acoustic model. CPU is the
   default and already far faster than real time; the GPU path is untested on real hardware
 - `microphone` — part of a device name; empty follows the Windows default device

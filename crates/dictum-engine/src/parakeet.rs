@@ -15,6 +15,7 @@ use ort::session::{RunOptions, Session};
 use ort::value::TensorElementType;
 use ort::value::TensorRef;
 
+use crate::boost::{self, Booster, Partial};
 use crate::session::{self, Source};
 use crate::vocab::Vocab;
 use crate::{Device, EngineOptions};
@@ -29,6 +30,7 @@ pub struct Parakeet {
     encoder: Session,
     decoder_joint: Session,
     vocab: Vocab,
+    booster: Option<Booster>,
     state1_shape: Vec<usize>,
     state2_shape: Vec<usize>,
     targets_are_i64: bool,
@@ -132,8 +134,17 @@ impl Parakeet {
             other => bail!("unsupported decoder target type {other:?}"),
         };
 
-        let mut model =
-            Self { preprocessor, encoder, decoder_joint, vocab, state1_shape, state2_shape, targets_are_i64 };
+        let booster = Booster::new(&options.vocabulary, &vocab, boost::BONUS);
+        let mut model = Self {
+            preprocessor,
+            encoder,
+            decoder_joint,
+            vocab,
+            booster,
+            state1_shape,
+            state2_shape,
+            targets_are_i64,
+        };
         model.warm_up()?;
         Ok(model)
     }
@@ -230,22 +241,45 @@ impl Parakeet {
     ) -> Result<Option<Vec<usize>>> {
         let vocab_size = self.vocab.len();
         let blank = self.vocab.blank();
-        let mut state1 = vec![0f32; self.state1_shape.iter().product()];
-        let mut state2 = vec![0f32; self.state2_shape.iter().product()];
         let target_len_i32 = [1i32];
         let target_len_i64 = [1i64];
 
-        let mut tokens = Vec::new();
-        let mut last = blank;
-        let mut t = 0;
-        let mut emitted = 0;
-        while t < count {
+        let mut at = Cursor {
+            t: 0,
+            emitted: 0,
+            last: blank,
+            tokens: Vec::new(),
+            state1: vec![0f32; self.state1_shape.iter().product()],
+            state2: vec![0f32; self.state2_shape.iter().product()],
+            partials: Vec::new(),
+        };
+        // Vocabulary boosting is all-or-nothing per phrase: when a boosted token changes the
+        // output, decoding resumes from `checkpoint` (with boosting off for that step) unless a
+        // phrase in progress gets completed. No new phrases start until that is settled.
+        let mut checkpoint: Option<Cursor> = None;
+        let mut completed = false;
+        let mut vetoed: Vec<(usize, usize)> = Vec::new();
+        loop {
+            if !completed
+                && (at.partials.is_empty() || at.t >= count)
+                && let Some(restored) = checkpoint.take()
+            {
+                vetoed.push(restored.step());
+                at = restored;
+                continue;
+            }
+            if at.partials.is_empty() {
+                checkpoint = None;
+            }
+            if at.t >= count {
+                break;
+            }
             if interrupt.is_some_and(Interrupt::is_triggered) {
                 return Ok(None);
             }
-            let frame = &frames[t * dim..(t + 1) * dim];
-            let target_i32 = [last as i32];
-            let target_i64 = [last as i64];
+            let frame = &frames[at.t * dim..(at.t + 1) * dim];
+            let target_i32 = [at.last as i32];
+            let target_i64 = [at.last as i64];
             let (targets, target_length) = if self.targets_are_i64 {
                 (
                     TensorRef::from_array_view(([1usize, 1], &target_i64[..]))?.into_dyn(),
@@ -261,32 +295,64 @@ impl Parakeet {
                 "encoder_outputs" => TensorRef::from_array_view(([1usize, dim, 1], frame))?,
                 "targets" => targets,
                 "target_length" => target_length,
-                "input_states_1" => TensorRef::from_array_view((self.state1_shape.clone(), &state1[..]))?,
-                "input_states_2" => TensorRef::from_array_view((self.state2_shape.clone(), &state2[..]))?,
+                "input_states_1" => TensorRef::from_array_view((self.state1_shape.clone(), &at.state1[..]))?,
+                "input_states_2" => TensorRef::from_array_view((self.state2_shape.clone(), &at.state2[..]))?,
             ])?;
             let (_, logits) = out["outputs"].try_extract_tensor::<f32>()?;
             ensure!(logits.len() > vocab_size, "decoder output too small");
-            let token = argmax(&logits[..vocab_size]);
+            let plain = argmax(&logits[..vocab_size]);
+            let mut token = plain;
+            if let Some(booster) = &self.booster
+                && !vetoed.contains(&at.step())
+            {
+                token = booster.pick(&logits[..vocab_size], plain, &at.partials, checkpoint.is_none());
+                if token != plain && checkpoint.is_none() {
+                    checkpoint = Some(at.clone());
+                    completed = false;
+                }
+            }
             let skip = argmax(&logits[vocab_size..]);
 
             if token != blank {
                 let (_, s1) = out["output_states_1"].try_extract_tensor::<f32>()?;
                 let (_, s2) = out["output_states_2"].try_extract_tensor::<f32>()?;
-                state1.copy_from_slice(s1);
-                state2.copy_from_slice(s2);
-                tokens.push(token);
-                last = token;
-                emitted += 1;
+                at.state1.copy_from_slice(s1);
+                at.state2.copy_from_slice(s2);
+                at.tokens.push(token);
+                if let Some(booster) = &self.booster {
+                    completed |= booster.advance(&mut at.partials, token, checkpoint.is_none());
+                }
+                at.last = token;
+                at.emitted += 1;
             }
             if skip > 0 {
-                t += skip;
-                emitted = 0;
-            } else if token == blank || emitted >= MAX_TOKENS_PER_STEP {
-                t += 1;
-                emitted = 0;
+                at.t += skip;
+                at.emitted = 0;
+            } else if token == blank || at.emitted >= MAX_TOKENS_PER_STEP {
+                at.t += 1;
+                at.emitted = 0;
             }
         }
-        Ok(Some(tokens))
+        Ok(Some(at.tokens))
+    }
+}
+
+/// Greedy decoder position and state.
+#[derive(Clone)]
+struct Cursor {
+    t: usize,
+    emitted: usize,
+    last: usize,
+    tokens: Vec<usize>,
+    state1: Vec<f32>,
+    state2: Vec<f32>,
+    partials: Vec<Partial>,
+}
+
+impl Cursor {
+    /// Identifies a decoding step on the current path.
+    fn step(&self) -> (usize, usize) {
+        (self.t, self.tokens.len())
     }
 }
 
