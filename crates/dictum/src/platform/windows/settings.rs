@@ -216,8 +216,7 @@ fn init(hwnd: HWND) {
 
     // Listing devices can take a moment: keep it off the thread that runs the keyboard hook.
     let target = hwnd as usize;
-    std::thread::spawn(move || {
-        let names = crate::audio::microphone_names();
+    crate::audio::list_microphones(move |names| {
         *found.lock().unwrap() = Some(names);
         unsafe { PostMessageW(target as HWND, WM_MICROPHONES, 0, 0) };
     });

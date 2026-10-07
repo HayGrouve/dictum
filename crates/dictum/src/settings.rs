@@ -16,11 +16,14 @@ pub fn hotkey_label(spec: &str) -> String {
 }
 
 /// Reads the hotkey field back into a spec. `current` is kept as written when the field still
-/// means the same hotkey.
+/// means the same hotkey; presets are written the way they are listed.
 pub fn hotkey_spec(text: &str, current: &str) -> Result<String> {
     let hotkey = Hotkey::parse(text).with_context(|| format!("“{}” is not a valid hotkey", text.trim()))?;
     if Hotkey::parse(current).is_ok_and(|c| c == hotkey) {
         return Ok(current.to_string());
+    }
+    if let Some(preset) = HOTKEY_PRESETS.iter().find(|p| Hotkey::parse(p).is_ok_and(|p| p == hotkey)) {
+        return Ok(preset.to_string());
     }
     Ok(text.split('+').map(|p| p.trim().to_ascii_lowercase().replace(' ', "_")).collect::<Vec<_>>().join("+"))
 }
@@ -109,6 +112,7 @@ mod tests {
         // Unchanged hotkeys keep the user's spelling.
         assert_eq!(hotkey_spec("Ctrl+Win", "control+super").unwrap(), "control+super");
         assert_eq!(hotkey_spec(" Left Alt + Space ", "ctrl+win").unwrap(), "left_alt+space");
+        assert_eq!(hotkey_spec("control+super", "f13").unwrap(), "ctrl+win");
         assert!(hotkey_spec("ctrl+banana", "ctrl+win").is_err());
         assert!(hotkey_spec("", "ctrl+win").is_err());
     }
