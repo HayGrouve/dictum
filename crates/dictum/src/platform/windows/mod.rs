@@ -196,7 +196,14 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
     }
 }
 
+/// Opens a file with its default app. Runs off the main thread: the keyboard hook lives there and
+/// Windows drops hooks that stop responding, while ShellExecute can block for a while.
 fn open(path: &Path) {
+    let path = path.to_path_buf();
+    std::thread::spawn(move || open_blocking(&path));
+}
+
+fn open_blocking(path: &Path) {
     let file = wide(&path.display().to_string());
     let result = unsafe {
         ShellExecuteW(
@@ -286,6 +293,7 @@ pub fn run(ui: &Ui, bindings: Bindings, commands: Sender<Command>, paths: &Paths
             } else if id == log_item.id() {
                 open(&paths.log_file);
             } else if id == autostart_item.id() {
+                // Registry writes are quick; the checkbox already shows the new state.
                 let enable = autostart_item.is_checked();
                 if let Err(e) = autostart::set(enable) {
                     log::error!("{e:#}");

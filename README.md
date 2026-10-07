@@ -31,8 +31,8 @@ On first launch Dictum downloads the speech model (~670 MB, checksum-verified, r
   text out of clipboard history) or `"type"` (never touches the clipboard)
 - `remove_fillers`, `voice_commands` ("new line" / "new paragraph"), `trailing_space`
 - `[replacements]` — a personal dictionary, e.g. `"get hub" = "GitHub"`
-- `device = "gpu"` — DirectML (any DX12 GPU) for the acoustic model; CPU is the default and is
-  already well under real time
+- `device = "gpu"` — *experimental*: DirectML (any DX12 GPU) for the acoustic model. CPU is the
+  default and already far faster than real time; the GPU path is untested on real hardware
 - `microphone` — part of a device name; empty follows the Windows default device
 
 Use tray → *Restart* after editing.
@@ -63,8 +63,10 @@ clipboard, and your previous clipboard contents (all formats) are put back.
 
 ## Installing a build
 
-Download `dictum-windows-x64.zip` from the latest CI run, unzip it anywhere and run
-`dictum.exe`.
+Download `dictum-windows-x64.zip` from the latest release (or the latest CI run's artifacts),
+unzip it anywhere and run `dictum.exe`. The zip contains the exe plus the DLLs it needs (MSVC
+runtime, DirectML); nothing has to be installed. To publish a release: `git tag v0.1.0 && git
+push --tags`.
 
 > **Smart App Control / SmartScreen:** builds are not code-signed yet. If Smart App Control is
 > on, Windows blocks unsigned apps outright; it can only be allowed by turning Smart App Control

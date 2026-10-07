@@ -46,4 +46,6 @@ SOFTWARE.
 ## Runtime
 
 [ONNX Runtime](https://github.com/microsoft/onnxruntime) (MIT), linked statically through the
-[`ort`](https://github.com/pykeio/ort) crate (MIT/Apache-2.0).
+[`ort`](https://github.com/pykeio/ort) crate (MIT/Apache-2.0). Windows packages also carry
+`DirectML.dll` (Microsoft DirectML redistributable) and the Microsoft Visual C++ runtime DLLs
+(redistributable under the Visual Studio license terms).

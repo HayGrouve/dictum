@@ -16,16 +16,22 @@ fn color(status: Status) -> [u8; 3] {
 
 /// RGBA pixels, `SIZE` x `SIZE`.
 pub fn rgba(status: Status) -> Vec<u8> {
+    rgba_sized(status, SIZE)
+}
+
+/// RGBA pixels at any size (the design is drawn on a 32-unit grid and scaled).
+pub fn rgba_sized(status: Status, size: u32) -> Vec<u8> {
     const SS: u32 = 4; // supersampling per axis
+    let scale = 32.0 / size as f32;
     let [r, g, b] = color(status);
-    let mut out = Vec::with_capacity((SIZE * SIZE * 4) as usize);
-    for y in 0..SIZE {
-        for x in 0..SIZE {
+    let mut out = Vec::with_capacity((size * size * 4) as usize);
+    for y in 0..size {
+        for x in 0..size {
             let (mut disc, mut glyph) = (0u32, 0u32);
             for sy in 0..SS {
                 for sx in 0..SS {
-                    let px = x as f32 + (sx as f32 + 0.5) / SS as f32;
-                    let py = y as f32 + (sy as f32 + 0.5) / SS as f32;
+                    let px = (x as f32 + (sx as f32 + 0.5) / SS as f32) * scale;
+                    let py = (y as f32 + (sy as f32 + 0.5) / SS as f32) * scale;
                     if in_disc(px, py) {
                         disc += 1;
                         if in_mic(px, py) {
@@ -82,5 +88,13 @@ mod tests {
             assert_eq!(&px[center..center + 4], &[255, 255, 255, 255], "mic body is white");
         }
         assert_ne!(rgba(Status::Ready), rgba(Status::Recording));
+    }
+
+    #[test]
+    fn scales() {
+        let big = rgba_sized(Status::Ready, 256);
+        assert_eq!(big.len(), 256 * 256 * 4);
+        let center = ((96 * 256 + 128) * 4) as usize;
+        assert_eq!(&big[center..center + 4], &[255, 255, 255, 255]);
     }
 }

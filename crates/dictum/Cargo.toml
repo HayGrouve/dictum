@@ -34,3 +34,6 @@ windows-sys = { version = "0.61", features = [
 
 [dev-dependencies]
 hound = "3.5"
+
+[build-dependencies]
+embed-resource = "3"
