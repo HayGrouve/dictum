@@ -8,10 +8,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 
 use super::{Ui, wide};
-use crate::update::{self, Version};
-
-/// Longest excerpt of the release notes shown in the confirmation dialog.
-const MAX_NOTES: usize = 700;
+use crate::update::{self, Version, text};
 
 /// Runs the whole check on a background thread; a second click while one runs is ignored.
 pub fn check(ui: &Ui) {
@@ -31,39 +28,21 @@ fn run(ui: &Ui) {
     let release = match update::check(current) {
         Ok(Some(release)) => release,
         Ok(None) => {
-            message(&format!("Dictum {current} is the latest version."), MB_OK | MB_ICONINFORMATION);
+            message(&text::up_to_date(current), MB_OK | MB_ICONINFORMATION);
             return;
         }
         Err(e) => {
             log::warn!("update check failed: {e:#}");
-            let detail = if format!("{e:#}").contains("404") {
-                "No release has been published yet.".to_string()
-            } else {
-                format!("{e:#}")
-            };
-            message(&format!("Couldn't check for updates.\n\n{detail}"), MB_OK | MB_ICONWARNING);
+            message(&text::check_failed(&e), MB_OK | MB_ICONWARNING);
             return;
         }
     };
     log::info!("update available: {} (running {current})", release.version);
-    let mut notes: String = release.notes.chars().take(MAX_NOTES).collect();
-    if notes.len() < release.notes.len() {
-        notes.push('…');
-    }
-    let prompt = format!(
-        "Dictum {} is available (you have {current}).\n\n{notes}\n\nDownload it and restart Dictum now? \
-         Your settings, vocabulary and speech model are kept.",
-        release.version
-    );
-    if message(&prompt, MB_YESNO | MB_ICONQUESTION) != IDYES {
+    if message(&text::offer(&release, current), MB_YESNO | MB_ICONQUESTION) != IDYES {
         return;
     }
-    let dir = match std::env::current_exe() {
-        Ok(exe) => exe.parent().map(|d| d.to_path_buf()),
-        Err(_) => None,
-    };
-    let Some(dir) = dir else {
-        message("Couldn't find where Dictum is installed.", MB_OK | MB_ICONWARNING);
+    let Some(dir) = update::install_target() else {
+        message(text::NO_TARGET, MB_OK | MB_ICONWARNING);
         return;
     };
     match update::install(&release, &dir) {
@@ -73,7 +52,7 @@ fn run(ui: &Ui) {
         }
         Err(e) => {
             log::error!("update failed: {e:#}");
-            message(&format!("The update failed; Dictum was not changed.\n\n{e:#}"), MB_OK | MB_ICONWARNING);
+            message(&text::failed(&e), MB_OK | MB_ICONWARNING);
         }
     }
 }

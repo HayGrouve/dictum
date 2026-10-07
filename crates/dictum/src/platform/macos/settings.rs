@@ -10,10 +10,10 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject, Sel};
 use objc2::{MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSAlert, NSAlertStyle, NSApplication, NSBackingStoreType, NSBorderType, NSButton, NSColor, NSComboBox,
-    NSComboBoxDelegate, NSControlStateValueOff, NSControlStateValueOn, NSControlTextEditingDelegate, NSFont,
-    NSPopUpButton, NSTextAlignment, NSTextField, NSTextFieldDelegate, NSTextView, NSView, NSWindow,
-    NSWindowDelegate, NSWindowStyleMask,
+    NSAlertStyle, NSBackingStoreType, NSBorderType, NSButton, NSColor, NSComboBox, NSComboBoxDelegate,
+    NSControlStateValueOff, NSControlStateValueOn, NSControlTextEditingDelegate, NSFont, NSPopUpButton,
+    NSTextAlignment, NSTextField, NSTextFieldDelegate, NSTextView, NSView, NSWindow, NSWindowDelegate,
+    NSWindowStyleMask,
 };
 use objc2_foundation::{NSArray, NSNotification, NSPoint, NSRect, NSSize, NSString};
 
@@ -217,7 +217,7 @@ impl FlippedView {
 /// Opens the settings window, or brings it forward if it is already open.
 pub fn open(config_file: &Path) {
     let Some(mtm) = MainThreadMarker::new() else { return };
-    activate(mtm);
+    super::activate(mtm);
     if let Some(window) = OPEN.with(|o| o.borrow().as_ref().map(|s| s.window.clone())) {
         window.makeKeyAndOrderFront(None);
         return;
@@ -226,7 +226,12 @@ pub fn open(config_file: &Path) {
         Ok(config) => config,
         Err(e) => {
             log::error!("{e:#}");
-            alert(mtm, &format!("{e:#}\n\nOpening the file so you can fix it."));
+            super::alert(
+                mtm,
+                &format!("{e:#}\n\nOpening the file so you can fix it."),
+                NSAlertStyle::Warning,
+                &[],
+            );
             super::open(config_file, true);
             return;
         }
@@ -241,16 +246,6 @@ pub fn open(config_file: &Path) {
     crate::audio::list_microphones(|names| super::main_async(move || show_microphones(&names)));
     window.center();
     window.makeKeyAndOrderFront(None);
-}
-
-fn activate(mtm: MainThreadMarker) {
-    let app = NSApplication::sharedApplication(mtm);
-    if app.respondsToSelector(sel!(activate)) {
-        app.activate();
-    } else {
-        #[allow(deprecated)]
-        app.activateIgnoringOtherApps(true);
-    }
 }
 
 fn close() {
@@ -313,7 +308,7 @@ fn save() {
         }
         // No borrow is held here: the alert runs a modal loop that may call back into us.
         Err(problem) => {
-            alert(mtm, &problem.message);
+            super::alert(mtm, &problem.message, NSAlertStyle::Warning, &[]);
             let focus = problem.field.and_then(|field| {
                 OPEN.with(|o| o.borrow().as_ref().map(|s| Retained::from(s.widget(field).view())))
             });
@@ -322,15 +317,6 @@ fn save() {
             }
         }
     }
-}
-
-fn alert(mtm: MainThreadMarker, message: &str) {
-    let (title, details) = message.split_once("\n\n").unwrap_or((message, ""));
-    let alert = NSAlert::new(mtm);
-    alert.setAlertStyle(NSAlertStyle::Warning);
-    alert.setMessageText(&NSString::from_str(title));
-    alert.setInformativeText(&NSString::from_str(details));
-    alert.runModal();
 }
 
 /// Lays out labels and controls top to bottom in a flipped view.
