@@ -7,12 +7,11 @@ use std::time::{Duration, Instant};
 
 use windows_sys::Win32::Foundation::HWND;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput, SetFocus, VK_MENU, VK_RCONTROL,
-    VK_SPACE,
+    INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput, SetFocus, VK_RCONTROL, VK_SPACE,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DestroyWindow, DispatchMessageW, GetForegroundWindow, GetWindowTextW, MSG, PM_REMOVE,
-    PeekMessageW, SW_SHOW, SetForegroundWindow, ShowWindow, TranslateMessage, WS_OVERLAPPEDWINDOW,
+    PeekMessageW, SW_SHOW, SetForegroundWindow, ShowWindow, TranslateMessage, WS_BORDER, WS_POPUP,
     WS_VISIBLE,
 };
 
@@ -21,6 +20,35 @@ use crate::hotkey::{Action, Hotkey, Key};
 
 /// The clipboard, focus and keyboard are global: run these one at a time.
 static DESKTOP: Mutex<()> = Mutex::new(());
+
+/// Kills the test process with a clear message if a desktop test hangs (a stuck SendMessage
+/// would otherwise hang CI silently).
+struct Watchdog(Option<crossbeam_channel::Sender<()>>);
+
+impl Watchdog {
+    fn new(name: &'static str) -> Self {
+        let (tx, rx) = crossbeam_channel::bounded::<()>(1);
+        std::thread::spawn(move || {
+            if let Err(crossbeam_channel::RecvTimeoutError::Timeout) =
+                rx.recv_timeout(Duration::from_secs(60))
+            {
+                eprintln!("WATCHDOG: {name} hung for 60 s; aborting");
+                std::process::exit(101);
+            }
+        });
+        Self(Some(tx))
+    }
+}
+
+impl Drop for Watchdog {
+    fn drop(&mut self) {
+        self.0.take();
+    }
+}
+
+fn step(name: &str) {
+    eprintln!("  .. {name}");
+}
 
 fn pump_for(duration: Duration) {
     let deadline = Instant::now() + duration;
@@ -66,7 +94,8 @@ fn focused_edit() -> Option<HWND> {
             0,
             class.as_ptr(),
             wide("").as_ptr(),
-            WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+            // No system menu: a stray Alt must not put the window into modal menu mode.
+            WS_POPUP | WS_BORDER | WS_VISIBLE,
             100,
             100,
             600,
@@ -82,8 +111,8 @@ fn focused_edit() -> Option<HWND> {
     }
     for _ in 0..20 {
         // Synthetic input makes this process the last one to receive input, which lets it take
-        // the foreground.
-        press(&[key_event(VK_MENU, false), key_event(VK_MENU, true)]);
+        // the foreground. An unassigned key has no side effects (Alt would enter menu mode).
+        press(&[key_event(0xE8, false), key_event(0xE8, true)]);
         unsafe {
             ShowWindow(hwnd, SW_SHOW);
             SetForegroundWindow(hwnd);
@@ -107,17 +136,20 @@ fn window_text(hwnd: HWND) -> String {
 /// Inserts on a helper thread (as the app does) while this thread pumps the edit control.
 fn insert_and_read(method: InsertMethod, text: &str) -> Option<String> {
     let ui = create_ui(false).unwrap();
+    step("focus an edit control");
     let edit = focused_edit()?;
+    step("insert");
     let worker = {
         let ui = ui.clone();
         let text = text.to_string();
         std::thread::spawn(move || insert_text(&ui, &text, method, true))
     };
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while !worker.is_finished() && Instant::now() < deadline {
+    // Keep pumping while joining: the worker may be waiting on a message to this thread.
+    while !worker.is_finished() {
         pump_for(Duration::from_millis(20));
     }
     worker.join().unwrap().unwrap();
+    step("read back");
     pump_for(Duration::from_millis(200));
     let result = window_text(edit);
     unsafe { DestroyWindow(edit) };
@@ -127,15 +159,20 @@ fn insert_and_read(method: InsertMethod, text: &str) -> Option<String> {
 #[test]
 fn clipboard_round_trip_preserves_previous_contents() {
     let _desktop = DESKTOP.lock().unwrap_or_else(|e| e.into_inner());
+    let _watchdog = Watchdog::new("clipboard_round_trip");
     let owner = create_message_window().unwrap();
+    step("set original");
     if clipboard::set_text(owner, "original clipboard ✓").is_err() {
         eprintln!("SKIPPED: no clipboard");
         return;
     }
+    step("save");
     let saved = clipboard::save(owner).unwrap();
+    step("set dictated");
     let sequence = clipboard::set_text(owner, "dictated text").unwrap();
     assert_eq!(clipboard::read_text(owner).as_deref(), Some("dictated text"));
     assert_eq!(clipboard::sequence(), sequence);
+    step("restore");
     clipboard::restore(owner, &saved).unwrap();
     assert_eq!(clipboard::read_text(owner).as_deref(), Some("original clipboard ✓"));
 }
@@ -143,6 +180,7 @@ fn clipboard_round_trip_preserves_previous_contents() {
 #[test]
 fn paste_inserts_text_and_restores_clipboard() {
     let _desktop = DESKTOP.lock().unwrap_or_else(|e| e.into_inner());
+    let _watchdog = Watchdog::new("paste_inserts_text");
     let owner = create_message_window().unwrap();
     if clipboard::set_text(owner, "keep me").is_err() {
         eprintln!("SKIPPED: no clipboard");
@@ -160,6 +198,7 @@ fn paste_inserts_text_and_restores_clipboard() {
 #[test]
 fn typing_inserts_text_without_touching_clipboard() {
     let _desktop = DESKTOP.lock().unwrap_or_else(|e| e.into_inner());
+    let _watchdog = Watchdog::new("typing_inserts_text");
     let owner = create_message_window().unwrap();
     let _ = clipboard::set_text(owner, "untouched");
     let text = "Typed by Dictum: ünïcödé ✓ 😀 ";
@@ -174,6 +213,7 @@ fn typing_inserts_text_without_touching_clipboard() {
 #[test]
 fn keyboard_hook_drives_hotkey_actions() {
     let _desktop = DESKTOP.lock().unwrap_or_else(|e| e.into_inner());
+    let _watchdog = Watchdog::new("keyboard_hook");
     let (tx, rx) = crossbeam_channel::unbounded();
     let machine = Machine::new(Hotkey::parse("right_ctrl").unwrap(), Key::Space, Key::Escape);
     let _hook = hook::install(machine, tx).unwrap();
