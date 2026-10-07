@@ -142,9 +142,12 @@ impl Segmenter {
             self.offset = key.end;
             return Ok((!audio.is_empty()).then_some(FinalSegment { key, audio }));
         };
-        let scored = self.probs.len() * VAD_WINDOW;
-        if self.audio.len() > scored {
-            let mut window = self.audio[scored..].to_vec();
+        // Score everything not yet scored, zero-padding the last partial window. Cuts are not
+        // taken here: the whole remainder is the final segment.
+        while self.audio.len() > self.probs.len() * VAD_WINDOW {
+            let start = self.probs.len() * VAD_WINDOW;
+            let end = (start + VAD_WINDOW).min(self.audio.len());
+            let mut window = self.audio[start..end].to_vec();
             window.resize(VAD_WINDOW, 0.0);
             let p = vad.process(&window)?;
             self.observe(p);
