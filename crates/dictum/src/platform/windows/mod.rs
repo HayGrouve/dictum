@@ -26,7 +26,8 @@ use windows_sys::Win32::System::Threading::CreateMutexW;
 use windows_sys::Win32::UI::Shell::ShellExecuteW;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, HWND_MESSAGE, MSG, PostMessageW,
-    PostQuitMessage, RegisterClassW, SW_SHOWNORMAL, TranslateMessage, WM_APP, WNDCLASSW,
+    PostQuitMessage, RegisterClassW, SW_SHOWNORMAL, TranslateMessage, WM_APP, WM_DESTROYCLIPBOARD,
+    WM_RENDERALLFORMATS, WM_RENDERFORMAT, WNDCLASSW,
 };
 
 pub use input::wait_for_modifiers_released;
@@ -192,6 +193,18 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
             hook::reset();
             0
         }
+        WM_RENDERFORMAT => {
+            clipboard::render_requested(wparam as u32);
+            0
+        }
+        WM_RENDERALLFORMATS => {
+            clipboard::render_all(hwnd);
+            0
+        }
+        WM_DESTROYCLIPBOARD => {
+            clipboard::ownership_lost();
+            0
+        }
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
     }
 }
@@ -319,27 +332,30 @@ pub fn insert_text(ui: &Ui, text: &str, method: InsertMethod, restore_clipboard:
         InsertMethod::Type => input::type_text(text),
         InsertMethod::Paste => {
             let owner = ui.hwnd();
-            let saved = if restore_clipboard {
-                match clipboard::save(owner) {
-                    Ok(saved) => Some(saved),
-                    Err(e) => {
-                        log::warn!("could not save the clipboard: {e:#}");
-                        None
-                    }
+            if !restore_clipboard {
+                clipboard::set_text(owner, text)?;
+                return input::paste();
+            }
+            let saved = match clipboard::save(owner) {
+                Ok(saved) => saved,
+                Err(e) => {
+                    log::warn!("could not save the clipboard, it won't be restored: {e:#}");
+                    clipboard::set_text(owner, text)?;
+                    return input::paste();
                 }
-            } else {
-                None
             };
-            let sequence = clipboard::set_text(owner, text)?;
+            clipboard::offer_text(owner, text)?;
+            clipboard::arm();
             input::paste()?;
-            if let Some(saved) = saved {
-                // The target app reads the clipboard asynchronously after Ctrl+V.
-                std::thread::sleep(Duration::from_millis(400));
-                if clipboard::sequence() == sequence {
-                    clipboard::restore(owner, &saved)?;
-                } else {
-                    log::debug!("clipboard changed after paste; not restoring");
-                }
+            // Restore as soon as the target app has read the text (or give up waiting).
+            let (consumed, sequence) = clipboard::wait_consumed(Duration::from_millis(1500));
+            if !consumed {
+                log::warn!("the focused app did not read the pasted text");
+            }
+            if clipboard::sequence() == sequence {
+                clipboard::restore(owner, &saved)?;
+            } else {
+                log::debug!("clipboard changed after paste; not restoring");
             }
             Ok(())
         }
