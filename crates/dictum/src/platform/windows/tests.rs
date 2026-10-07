@@ -346,16 +346,22 @@ fn settings_window_rejects_an_invalid_hotkey() {
     let dialog = window::window().expect("settings window opens");
     set_text(dialog, ID_HOTKEY, "ctrl+banana");
 
-    // The warning is modal: dismiss it from another thread.
+    // The warning is modal: dismiss it from another thread. A message box ignores commands
+    // posted while it is still being set up, so keep pressing OK until it is gone.
     let dismisser = std::thread::spawn(|| {
         let deadline = Instant::now() + Duration::from_secs(10);
+        let mut seen = false;
         while Instant::now() < deadline {
             let found = unsafe { FindWindowW(wide("#32770").as_ptr(), wide("Dictum").as_ptr()) };
-            if !found.is_null() {
+            if found.is_null() {
+                if seen {
+                    return true;
+                }
+            } else {
+                seen = true;
                 unsafe { PostMessageW(found, WM_COMMAND, IDOK as usize, 0) };
-                return true;
             }
-            std::thread::sleep(Duration::from_millis(20));
+            std::thread::sleep(Duration::from_millis(100));
         }
         false
     });

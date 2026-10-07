@@ -22,8 +22,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     MB_ICONWARNING, MSG, MessageBoxW, PostMessageW, SM_CXICON, SM_CXSMICON, SM_CYICON, SM_CYSMICON,
     SW_RESTORE, SW_SHOW, SendDlgItemMessageW, SendMessageW, SetDlgItemTextW, SetForegroundWindow, ShowWindow,
     WM_APP, WM_COMMAND, WM_INITDIALOG, WM_NCDESTROY, WM_NEXTDLGCTL, WM_SETICON, WS_CAPTION, WS_CHILD,
-    WS_EX_APPWINDOW, WS_EX_CLIENTEDGE, WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
-    WS_VSCROLL,
+    WS_EX_APPWINDOW, WS_EX_CLIENTEDGE, WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
 };
 
 use super::{autostart, wide};
@@ -387,8 +386,8 @@ fn template() -> Vec<u32> {
         (227, 19, 199, 16),
     );
     t.edit(ID_VOCABULARY, (227, 37, 199, 72));
-    t.label("&Replacements for anything else, one per line, as  heard = written:", (227, 116, 199, 16));
-    t.edit(ID_REPLACEMENTS, (227, 134, 199, 42));
+    t.label("&Replacements for anything else, one per line:  heard = written", (227, 116, 199, 8));
+    t.edit(ID_REPLACEMENTS, (227, 127, 199, 49));
 
     t.button(ID_OPEN_FILE, "&Open config file", (7, 192, 70, 14), false);
     t.label("Saving restarts Dictum to apply the changes.", (84, 195, 200, 8));
@@ -412,11 +411,7 @@ impl Template {
     const COMBOBOX: u16 = 0x0085;
 
     fn new(title: &str, cx: i16, cy: i16) -> Self {
-        let style = WS_POPUP
-            | WS_CAPTION
-            | WS_SYSMENU
-            | WS_MINIMIZEBOX
-            | (DS_MODALFRAME | DS_SETFONT | DS_CENTER) as u32;
+        let style = WS_POPUP | WS_CAPTION | WS_SYSMENU | (DS_MODALFRAME | DS_SETFONT | DS_CENTER) as u32;
         let mut t = Self { words: vec![1, 0xFFFF], items: 0 }; // version, signature
         t.dword(0); // help ID
         t.dword(WS_EX_APPWINDOW);
