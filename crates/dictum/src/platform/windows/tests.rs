@@ -6,16 +6,20 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use windows_sys::Win32::Foundation::HWND;
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput, SetFocus, VK_RCONTROL, VK_SPACE,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DestroyWindow, DispatchMessageW, GetForegroundWindow, GetWindowTextW, MSG, PM_REMOVE,
-    PeekMessageW, SW_SHOW, SetForegroundWindow, ShowWindow, TranslateMessage, WS_BORDER, WS_POPUP,
-    WS_VISIBLE,
+    CB_SETCURSEL, CBN_SELCHANGE, CreateWindowExW, DestroyWindow, DispatchMessageW, FindWindowW, GetDlgItem,
+    GetForegroundWindow, GetWindowTextW, IDCANCEL, IDOK, MSG, PM_REMOVE, PeekMessageW, SW_SHOW,
+    SendDlgItemMessageW, SendMessageW, SetForegroundWindow, ShowWindow, TranslateMessage, WM_COMMAND,
+    WS_BORDER, WS_POPUP, WS_VISIBLE,
 };
 
+use super::settings::{self as window, *};
 use super::*;
+use crate::config::Config;
 use crate::hotkey::{Action, Hotkey, Key};
 
 /// The clipboard, focus and keyboard are global: run these one at a time.
@@ -255,4 +259,114 @@ fn keyboard_hook_drives_hotkey_actions() {
 fn hotkey_state_is_read_from_the_keyboard() {
     let _desktop = DESKTOP.lock().unwrap_or_else(|e| e.into_inner());
     assert!(!hotkey_held(&Hotkey::parse("ctrl+shift+f13").unwrap()));
+}
+
+/// A config file of its own, removed afterwards.
+struct TempConfig(std::path::PathBuf);
+
+impl TempConfig {
+    fn new(name: &str, text: &str) -> Self {
+        let dir = std::env::temp_dir().join(format!("dictum-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("config.toml"), text).unwrap();
+        Self(dir)
+    }
+
+    fn path(&self) -> std::path::PathBuf {
+        self.0.join("config.toml")
+    }
+
+    fn text(&self) -> String {
+        std::fs::read_to_string(self.path()).unwrap()
+    }
+}
+
+impl Drop for TempConfig {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn click(dialog: HWND, id: i32) {
+    unsafe { SendMessageW(dialog, WM_COMMAND, id as usize, 0) };
+}
+
+const SETTINGS_FILE: &str = "# Mine\nhotkey = \"right_ctrl\"\nthreads = 2\nvocabulary = [\"Vercel\"]\n\n[replacements]\n\"get hub\" = \"GitHub\"\n";
+
+#[test]
+fn settings_window_saves_changes_into_the_file() {
+    let _desktop = DESKTOP.lock().unwrap_or_else(|e| e.into_inner());
+    let _watchdog = Watchdog::new("settings_window_saves");
+    let config = TempConfig::new("settings-save", SETTINGS_FILE);
+    window::open(&config.path());
+    let dialog = window::window().expect("settings window opens");
+    pump_for(Duration::from_millis(300));
+
+    step("fields show the file");
+    assert_eq!(text(dialog, ID_HOTKEY), "Right Ctrl");
+    assert!(checked(dialog, ID_SOUNDS) && checked(dialog, ID_FILLERS) && !checked(dialog, ID_COMMANDS));
+    assert_eq!(selection(dialog, ID_MICROPHONE), Some(0), "system default");
+    assert_eq!(selection(dialog, ID_INSERT), Some(0), "paste");
+    assert_eq!(text(dialog, ID_VOCABULARY), "Vercel");
+    assert_eq!(text(dialog, ID_REPLACEMENTS), "get hub = GitHub");
+
+    step("choosing typing disables the clipboard option");
+    let restore = unsafe { GetDlgItem(dialog, ID_RESTORE) };
+    assert_ne!(unsafe { IsWindowEnabled(restore) }, 0);
+    unsafe { SendDlgItemMessageW(dialog, ID_INSERT, CB_SETCURSEL, 1, 0) };
+    click(dialog, ID_INSERT | (CBN_SELCHANGE as i32) << 16);
+    assert_eq!(unsafe { IsWindowEnabled(restore) }, 0);
+
+    step("edit and save");
+    set_text(dialog, ID_HOTKEY, "Ctrl+Shift+Space");
+    check(dialog, ID_SOUNDS, false);
+    check(dialog, ID_COMMANDS, true);
+    set_text(dialog, ID_VOCABULARY, "Vercel\r\nClaude Code\r\n");
+    click(dialog, IDOK);
+    assert_eq!(window::take_saved(), Some(true), "saved and asks for a restart");
+    assert!(window::window().is_none(), "window closed");
+
+    let text = config.text();
+    assert!(text.starts_with("# Mine\nhotkey = \"ctrl+shift+space\"\nthreads = 2\n"), "{text}");
+    let saved = Config::parse(&text).unwrap();
+    assert!(!saved.sounds && saved.voice_commands && saved.remove_fillers);
+    assert_eq!(saved.insert_method, InsertMethod::Type);
+    assert_eq!(saved.vocabulary, ["Vercel", "Claude Code"]);
+    assert_eq!(saved.replacements.get("get hub").map(String::as_str), Some("GitHub"));
+    assert_eq!(saved.threads, 2);
+}
+
+#[test]
+fn settings_window_rejects_an_invalid_hotkey() {
+    let _desktop = DESKTOP.lock().unwrap_or_else(|e| e.into_inner());
+    let _watchdog = Watchdog::new("settings_window_rejects");
+    let config = TempConfig::new("settings-reject", SETTINGS_FILE);
+    window::open(&config.path());
+    let dialog = window::window().expect("settings window opens");
+    set_text(dialog, ID_HOTKEY, "ctrl+banana");
+
+    // The warning is modal: dismiss it from another thread.
+    let dismisser = std::thread::spawn(|| {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            let found = unsafe { FindWindowW(wide("#32770").as_ptr(), wide("Dictum").as_ptr()) };
+            if !found.is_null() {
+                unsafe { PostMessageW(found, WM_COMMAND, IDOK as usize, 0) };
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        false
+    });
+    click(dialog, IDOK);
+    assert!(dismisser.join().unwrap(), "a warning was shown");
+    assert_eq!(window::take_saved(), None);
+    assert_eq!(window::window(), Some(dialog), "still open for a fix");
+    assert_eq!(config.text(), SETTINGS_FILE, "file untouched");
+
+    click(dialog, IDCANCEL);
+    assert!(window::window().is_none());
+    assert_eq!(window::take_saved(), None);
+    assert_eq!(config.text(), SETTINGS_FILE);
 }

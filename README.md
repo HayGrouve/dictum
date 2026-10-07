@@ -25,7 +25,13 @@ On first launch Dictum downloads the speech model (~670 MB, checksum-verified, r
 
 ## Settings
 
-`%APPDATA%\Dictum\config.toml` is created on first run with every option documented. Highlights:
+Tray → *Settings…* opens a window with the settings you're likely to change: hotkey, microphone,
+sounds, *Start with Windows*, how text is inserted, filler-word removal, voice commands, trailing
+space, vocabulary and replacements. *Save* writes them to the config file and restarts Dictum to
+apply them.
+
+Everything is stored in `%APPDATA%\Dictum\config.toml`, created on first run with every option
+documented (the settings window keeps your comments and formatting). Highlights:
 
 - `hotkey` — e.g. `"ctrl+win"` (default), `"right_ctrl"`, `"right_alt"`, `"f13"`
 - `insert_method` — `"paste"` (default; restores your clipboard afterwards and keeps dictated
@@ -42,7 +48,7 @@ On first launch Dictum downloads the speech model (~670 MB, checksum-verified, r
   default and already far faster than real time; the GPU path is untested on real hardware
 - `microphone` — part of a device name; empty follows the Windows default device
 
-Use tray → *Restart* after editing.
+After editing the file by hand, use tray → *Restart*.
 
 ## Performance
 

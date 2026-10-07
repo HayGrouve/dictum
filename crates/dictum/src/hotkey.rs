@@ -124,7 +124,8 @@ impl fmt::Display for Hotkey {
 }
 
 pub fn parse_key(name: &str) -> Result<Key> {
-    let name = name.trim().to_ascii_lowercase();
+    // Spaces count as underscores, so display names ("Right Ctrl") parse too.
+    let name = name.trim().to_ascii_lowercase().replace(' ', "_");
     Ok(match name.as_str() {
         "left_ctrl" | "lctrl" => Key::LCtrl,
         "right_ctrl" | "rctrl" => Key::RCtrl,
@@ -394,6 +395,16 @@ mod tests {
             assert_eq!(Hotkey::parse("ctrl+win").unwrap().to_string(), "Ctrl+Win");
         }
         assert_eq!(Hotkey::parse("right_ctrl").unwrap().to_string(), "Right Ctrl");
+    }
+
+    #[test]
+    fn display_names_parse_back() {
+        for spec in
+            ["ctrl+win", "right_ctrl", "left_alt+space", "ctrl+shift+f13", "caps_lock", "esc", "ctrl+k"]
+        {
+            let hotkey = Hotkey::parse(spec).unwrap();
+            assert_eq!(Hotkey::parse(&hotkey.to_string()).unwrap(), hotkey, "{spec}");
+        }
     }
 
     #[test]

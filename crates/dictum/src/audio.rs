@@ -12,6 +12,17 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, Sample, SampleFormat, SizedSample};
 use crossbeam_channel::{Receiver, Sender};
 
+/// Names of the connected microphones.
+pub fn microphone_names() -> Vec<String> {
+    match cpal::default_host().input_devices() {
+        Ok(devices) => devices.map(|d| d.to_string()).collect(),
+        Err(e) => {
+            log::warn!("failed to list microphones: {e}");
+            Vec::new()
+        }
+    }
+}
+
 struct Live {
     stream: cpal::Stream,
     rate: u32,
