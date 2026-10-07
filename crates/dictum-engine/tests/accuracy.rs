@@ -54,7 +54,8 @@ fn transcribes_reference_set_accurately_and_fast() {
     }
     let wer = errors as f64 / words as f64;
     let rtf = compute_secs / audio_secs;
-    eprintln!("WER {:.2}% over {words} words; real-time factor {rtf:.3}", wer * 100.0);
+    let cpus = std::thread::available_parallelism().map_or(0, |n| n.get());
+    eprintln!("WER {:.2}% over {words} words; real-time factor {rtf:.3} ({cpus} logical CPUs)", wer * 100.0);
     assert!(wer < 0.05, "WER too high: {:.2}%", wer * 100.0);
     assert!(rtf < 0.5, "inference far too slow: RTF {rtf:.3}");
 }
