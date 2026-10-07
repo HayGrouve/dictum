@@ -21,6 +21,7 @@ use super::settings::{self as window, *};
 use super::*;
 use crate::config::Config;
 use crate::hotkey::{Action, Hotkey, Key};
+use crate::indicator::Phase;
 
 /// The clipboard, focus and keyboard are global: run these one at a time.
 static DESKTOP: Mutex<()> = Mutex::new(());
@@ -139,7 +140,7 @@ fn window_text(hwnd: HWND) -> String {
 
 /// Inserts on a helper thread (as the app does) while this thread pumps the edit control.
 fn insert_and_read(method: InsertMethod, text: &str) -> Option<String> {
-    let ui = create_ui(false).unwrap();
+    let ui = create_ui(false, false).unwrap();
     step("focus an edit control");
     let edit = focused_edit()?;
     step("insert");
@@ -358,4 +359,42 @@ fn settings_window_rejects_an_invalid_hotkey() {
     assert!(window::window().is_none());
     assert_eq!(window::take_saved(), None);
     assert_eq!(config.text(), SETTINGS_FILE);
+}
+
+#[test]
+fn indicator_shows_without_taking_focus() {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GWL_EXSTYLE, GetWindowLongPtrW, IsWindowVisible, WS_EX_NOACTIVATE, WS_EX_TOPMOST, WS_EX_TRANSPARENT,
+    };
+    let _desktop = DESKTOP.lock().unwrap_or_else(|e| e.into_inner());
+    let _watchdog = Watchdog::new("indicator");
+    let ui = create_ui(false, true).unwrap();
+    let indicator = ui.indicator as HWND;
+    assert!(!indicator.is_null(), "indicator window created");
+    let ex_style = unsafe { GetWindowLongPtrW(indicator, GWL_EXSTYLE) } as u32;
+    let wanted = WS_EX_NOACTIVATE | WS_EX_TRANSPARENT | WS_EX_TOPMOST;
+    assert_eq!(ex_style & wanted, wanted, "click-through, topmost, never activated");
+    let Some(edit) = focused_edit() else {
+        eprintln!("SKIPPED: no interactive desktop");
+        return;
+    };
+
+    step("listening");
+    ui.set_status(Status::Recording, "Dictum: listening…".into(), Phase::Listening);
+    ui.level(&[0.1; 480]);
+    pump_for(Duration::from_millis(300));
+    assert_ne!(unsafe { IsWindowVisible(indicator) }, 0, "shown");
+    assert_eq!(unsafe { GetForegroundWindow() }, edit, "focus stays in the app being dictated into");
+
+    step("hands-free, then transcribing, then done");
+    ui.set_status(Status::Recording, "Dictum: listening…".into(), Phase::HandsFree);
+    pump_for(Duration::from_millis(100));
+    ui.set_status(Status::Transcribing, "Dictum: transcribing…".into(), Phase::Transcribing);
+    pump_for(Duration::from_millis(300));
+    assert_ne!(unsafe { IsWindowVisible(indicator) }, 0);
+    assert_eq!(unsafe { GetForegroundWindow() }, edit);
+    ui.set_status(Status::Ready, "Dictum".into(), Phase::Hidden);
+    pump_for(Duration::from_millis(100));
+    assert_eq!(unsafe { IsWindowVisible(indicator) }, 0, "hidden when idle");
+    unsafe { DestroyWindow(edit) };
 }

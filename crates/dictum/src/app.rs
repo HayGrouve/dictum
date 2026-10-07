@@ -17,6 +17,7 @@ use dictum_engine::{Parakeet, Vad};
 use crate::audio::Mic;
 use crate::config::{Bindings, Config};
 use crate::hotkey::{Action, Hotkey};
+use crate::indicator::Phase;
 use crate::paths::Paths;
 use crate::pipeline::{Dictation, Done, SpecControl, Stopped, Worker};
 use crate::platform::{self, Ui};
@@ -40,6 +41,7 @@ struct BoardState {
     loading: Option<String>,
     error: Option<String>,
     recording: bool,
+    hands_free: bool,
     pending: usize,
 }
 
@@ -58,7 +60,14 @@ impl Board {
         } else {
             (Status::Ready, format!("Dictum: hold {} to dictate", self.hotkey))
         };
-        self.ui.set_status(status, text);
+        let phase = if state.recording {
+            if state.hands_free { Phase::HandsFree } else { Phase::Listening }
+        } else if state.pending > 0 {
+            Phase::Transcribing
+        } else {
+            Phase::Hidden
+        };
+        self.ui.set_status(status, text, phase);
     }
 }
 
@@ -87,7 +96,7 @@ pub fn run() -> Result<()> {
         bindings.cancel
     );
 
-    let ui = platform::create_ui(config.sounds)?;
+    let ui = platform::create_ui(config.sounds, config.indicator)?;
     let board = Arc::new(Board {
         ui: ui.clone(),
         hotkey: bindings.hotkey.to_string(),
@@ -278,10 +287,12 @@ impl Controller {
                 },
                 recv(chunks) -> chunk => {
                     if let Ok(chunk) = chunk
-                        && self.dictation.is_recording()
-                            && let Err(e) = self.dictation.feed(&chunk) {
+                        && self.dictation.is_recording() {
+                            self.ui.level(&chunk);
+                            if let Err(e) = self.dictation.feed(&chunk) {
                                 log::error!("audio processing failed: {e:#}");
                             }
+                        }
                 },
                 default(Duration::from_millis(100)) => {}
             }
@@ -316,6 +327,7 @@ impl Controller {
             Action::LockHandsFree => {
                 if self.dictation.is_recording() {
                     self.mode = Mode::HandsFree;
+                    self.board.update(|s| s.hands_free = true);
                     self.ui.cue(Cue::Lock);
                 }
             }
@@ -378,6 +390,7 @@ impl Controller {
         let stopped = self.dictation.stop();
         self.board.update(|s| {
             s.recording = false;
+            s.hands_free = false;
             s.error = None;
             // Every successful stop queues exactly one result for the output thread.
             if stopped.is_ok() {
@@ -407,6 +420,9 @@ impl Controller {
         self.mic.stop();
         self.dictation.cancel();
         self.mode = Mode::Idle;
-        self.board.update(|s| s.recording = false);
+        self.board.update(|s| {
+            s.recording = false;
+            s.hands_free = false;
+        });
     }
 }

@@ -10,6 +10,7 @@
 mod config;
 mod hotkey;
 mod icons;
+mod indicator;
 mod pipeline;
 mod settings;
 mod sounds;

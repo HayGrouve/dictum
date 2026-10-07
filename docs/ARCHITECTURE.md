@@ -58,6 +58,11 @@ Runtime ships prebuilt for Windows (with DirectML), macOS (with CoreML) and Linu
   scales with DPI; Common Controls v6 via the manifest in `build.rs`). Device listing runs off the
   main thread. Saving writes only the changed fields with `toml_edit`, so comments survive, then
   restarts the app. The text conversions behind it (`settings.rs`) are platform independent.
+  The dictation indicator is a layered `WS_EX_NOACTIVATE | WS_EX_TRANSPARENT` topmost window on
+  the monitor of the foreground window. The board posts it the phase, and the controller feeds
+  mic chunks into a shared level meter. A 30 fps timer runs only while it is visible. Frames are
+  drawn in software by `indicator.rs` (platform independent, anti-aliased via signed distance
+  fields) and handed to `UpdateLayeredWindow`.
 
 ## Adding macOS
 

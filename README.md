@@ -15,6 +15,11 @@ with punctuation and capitalisation).
 | While holding, tap **Space** | Switch to hands-free; press **Ctrl+Win** again to finish |
 | **Esc** while recording | Discard the recording |
 
+While you dictate, a small bar at the bottom of the screen shows that Dictum is listening, with
+live levels from your microphone. In hands-free mode its red dot becomes a stop square, and it
+turns amber if transcription takes a moment. It never takes focus and clicks pass through it.
+Turn it off with `indicator = false` or in *Settings…*.
+
 A tray icon shows the state (grey = ready, red = listening, amber = transcribing, blue =
 loading) and its menu has *Settings…*, *Open log*, *Start with Windows*, *Check for updates*,
 *Restart* and *Quit*.
@@ -26,7 +31,7 @@ On first launch Dictum downloads the speech model (~670 MB, checksum-verified, r
 ## Settings
 
 Tray → *Settings…* opens a window with the settings you're likely to change: hotkey, microphone,
-sounds, *Start with Windows*, how text is inserted, filler-word removal, voice commands, trailing
+the on-screen indicator, sounds, *Start with Windows*, how text is inserted, filler-word removal, voice commands, trailing
 space, vocabulary and replacements. *Save* writes them to the config file and restarts Dictum to
 apply them.
 

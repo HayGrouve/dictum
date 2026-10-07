@@ -41,6 +41,7 @@ pub(super) const ID_SPACE: i32 = 108;
 pub(super) const ID_VOCABULARY: i32 = 109;
 pub(super) const ID_REPLACEMENTS: i32 = 110;
 pub(super) const ID_OPEN_FILE: i32 = 111;
+pub(super) const ID_INDICATOR: i32 = 112;
 
 /// Posted by the thread that lists the microphones.
 const WM_MICROPHONES: u32 = WM_APP + 10;
@@ -196,6 +197,7 @@ fn init(hwnd: HWND) {
     let (choices, selected) = settings::microphone_choices(&config.microphone, None);
     let labels: Vec<String> = choices.into_iter().map(|(label, _)| label).collect();
     fill_combo(hwnd, ID_MICROPHONE, &labels, Some(selected));
+    check(hwnd, ID_INDICATOR, config.indicator);
     check(hwnd, ID_SOUNDS, config.sounds);
     check(hwnd, ID_AUTOSTART, autostart);
 
@@ -262,6 +264,7 @@ fn save(hwnd: HWND) {
     };
     config.microphone =
         selection(hwnd, ID_MICROPHONE).and_then(|i| microphones.get(i)).cloned().unwrap_or_default();
+    config.indicator = checked(hwnd, ID_INDICATOR);
     config.sounds = checked(hwnd, ID_SOUNDS);
     config.insert_method =
         if selection(hwnd, ID_INSERT) == Some(1) { InsertMethod::Type } else { InsertMethod::Paste };
@@ -374,37 +377,38 @@ pub(super) fn selection(hwnd: HWND, id: i32) -> Option<usize> {
 
 /// The layout, in dialog units (they scale with the font and the display's DPI).
 fn template() -> Vec<u32> {
-    let mut t = Template::new(TITLE, 440, 213);
+    let mut t = Template::new(TITLE, 440, 227);
 
-    t.group("Dictation", (7, 7, 206, 80));
+    t.group("Dictation", (7, 7, 206, 94));
     t.label("&Hotkey:", (14, 21, 56, 8));
     t.combo(ID_HOTKEY, CBS_DROPDOWN | CBS_AUTOHSCROLL, (74, 19, 132, 100));
     t.label("&Microphone:", (14, 39, 56, 8));
     t.combo(ID_MICROPHONE, CBS_DROPDOWNLIST, (74, 37, 132, 120));
-    t.check(ID_SOUNDS, "Play a sound when recording starts and stops", (14, 56, 192, 10));
-    t.check(ID_AUTOSTART, "Start with Windows", (14, 70, 192, 10));
+    t.check(ID_INDICATOR, "Show an indicator on screen while dictating", (14, 56, 192, 10));
+    t.check(ID_SOUNDS, "Play a sound when recording starts and stops", (14, 70, 192, 10));
+    t.check(ID_AUTOSTART, "Start with Windows", (14, 84, 192, 10));
 
-    t.group("Text", (7, 94, 206, 89));
-    t.label("&Insert text by:", (14, 108, 56, 8));
-    t.combo(ID_INSERT, CBS_DROPDOWNLIST, (74, 106, 132, 60));
-    t.check(ID_RESTORE, "Put the clipboard back after pasting", (14, 125, 192, 10));
-    t.check(ID_FILLERS, "Remove filler words (um, uh)", (14, 139, 192, 10));
-    t.check(ID_COMMANDS, "Voice commands: “new line”, “new paragraph”", (14, 153, 192, 10));
-    t.check(ID_SPACE, "Add a space after each dictation", (14, 167, 192, 10));
+    t.group("Text", (7, 108, 206, 89));
+    t.label("&Insert text by:", (14, 122, 56, 8));
+    t.combo(ID_INSERT, CBS_DROPDOWNLIST, (74, 120, 132, 60));
+    t.check(ID_RESTORE, "Put the clipboard back after pasting", (14, 139, 192, 10));
+    t.check(ID_FILLERS, "Remove filler words (um, uh)", (14, 153, 192, 10));
+    t.check(ID_COMMANDS, "Voice commands: “new line”, “new paragraph”", (14, 167, 192, 10));
+    t.check(ID_SPACE, "Add a space after each dictation", (14, 181, 192, 10));
 
-    t.group("Vocabulary", (220, 7, 213, 176));
+    t.group("Vocabulary", (220, 7, 213, 190));
     t.label(
         "&Words and names recognition tends to get wrong, one per line, spelled the way you want them:",
         (227, 19, 199, 16),
     );
-    t.edit(ID_VOCABULARY, (227, 37, 199, 72));
-    t.label("&Replacements for anything else, one per line:  heard = written", (227, 116, 199, 8));
-    t.edit(ID_REPLACEMENTS, (227, 127, 199, 49));
+    t.edit(ID_VOCABULARY, (227, 37, 199, 79));
+    t.label("&Replacements for anything else, one per line:  heard = written", (227, 123, 199, 8));
+    t.edit(ID_REPLACEMENTS, (227, 134, 199, 56));
 
-    t.button(ID_OPEN_FILE, "&Open config file", (7, 192, 70, 14), false);
-    t.label("Saving restarts Dictum to apply the changes.", (84, 195, 200, 8));
-    t.button(IDOK, "Save", (329, 192, 50, 14), true);
-    t.button(IDCANCEL, "Cancel", (383, 192, 50, 14), false);
+    t.button(ID_OPEN_FILE, "&Open config file", (7, 206, 70, 14), false);
+    t.label("Saving restarts Dictum to apply the changes.", (84, 209, 200, 8));
+    t.button(IDOK, "Save", (329, 206, 50, 14), true);
+    t.button(IDCANCEL, "Cancel", (383, 206, 50, 14), false);
     t.finish()
 }
 
