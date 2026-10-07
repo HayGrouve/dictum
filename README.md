@@ -130,3 +130,8 @@ Cmd+V insertion and an `NSStatusItem`; see the architecture doc.
 
 See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) — Parakeet (CC BY 4.0), Silero VAD (MIT),
 ONNX Runtime (MIT).
+
+## License
+
+Dictum is [MIT](LICENSE) licensed. Bundled and downloaded third-party components keep their own
+licenses (see above).
