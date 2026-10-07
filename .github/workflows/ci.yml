@@ -52,9 +52,15 @@ jobs:
       - name: App unit tests
         timeout-minutes: 30
         run: cargo test -p dictum -- --test-threads=1 --skip platform::windows::tests
-      - name: Desktop integration tests (clipboard, paste, typing, keyboard hook)
+      - name: Desktop integration tests (clipboard, paste, typing, keyboard hook), 3 rounds
         timeout-minutes: 10
-        run: cargo test -p dictum platform::windows::tests -- --nocapture --test-threads=1
+        shell: pwsh
+        run: |
+          foreach ($round in 1..3) {
+            Write-Host "--- round $round"
+            cargo test -p dictum platform::windows::tests -- --nocapture --test-threads=1
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
       - name: Engine tests (accuracy + latency on real speech)
         timeout-minutes: 20
         run: cargo test -p dictum-engine -- --nocapture --test-threads=1
