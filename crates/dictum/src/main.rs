@@ -13,6 +13,7 @@ mod icons;
 mod pipeline;
 mod sounds;
 mod ui;
+mod update;
 
 #[cfg(windows)]
 mod app;

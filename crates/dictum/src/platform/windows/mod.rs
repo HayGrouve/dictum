@@ -8,6 +8,7 @@ mod input;
 mod keys;
 #[cfg(test)]
 mod tests;
+mod updates;
 
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -41,6 +42,7 @@ use crate::ui::{Cue, Status};
 
 const WM_STATUS: u32 = WM_APP + 1;
 const WM_RESET_HOTKEY: u32 = WM_APP + 2;
+const WM_RESTART: u32 = WM_APP + 3;
 
 /// Handle to the UI owned by the main thread; cheap to clone and usable from any thread.
 #[derive(Clone)]
@@ -73,6 +75,11 @@ impl Ui {
     /// Tells the hotkey state machine that the app ended the dictation by itself.
     pub fn reset_hotkey(&self) {
         unsafe { PostMessageW(self.hwnd(), WM_RESET_HOTKEY, 0, 0) };
+    }
+
+    /// Quits and starts Dictum again, like tray → Restart.
+    pub fn request_restart(&self) {
+        unsafe { PostMessageW(self.hwnd(), WM_RESTART, 0, 0) };
     }
 }
 
@@ -251,6 +258,8 @@ pub fn run(ui: &Ui, bindings: Bindings, commands: Sender<Command>, paths: &Paths
     let settings_item = MenuItem::new("Settings…", true, None);
     let log_item = MenuItem::new("Open log", true, None);
     let autostart_item = CheckMenuItem::new("Start with Windows", true, autostart::is_enabled(), None);
+    let update_item =
+        MenuItem::new(format!("Check for updates (v{})", crate::update::Version::current()), true, None);
     let restart_item = MenuItem::new("Restart", true, None);
     let quit_item = MenuItem::new("Quit Dictum", true, None);
     let menu = Menu::new();
@@ -260,6 +269,7 @@ pub fn run(ui: &Ui, bindings: Bindings, commands: Sender<Command>, paths: &Paths
         &settings_item,
         &log_item,
         &autostart_item,
+        &update_item,
         &PredefinedMenuItem::separator(),
         &restart_item,
         &quit_item,
@@ -294,6 +304,12 @@ pub fn run(ui: &Ui, bindings: Bindings, commands: Sender<Command>, paths: &Paths
         if got == 0 || got == -1 {
             break;
         }
+        if msg.message == WM_RESTART {
+            restart = true;
+            let _ = commands.send(Command::Quit);
+            unsafe { PostQuitMessage(0) };
+            continue;
+        }
         unsafe {
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
@@ -312,6 +328,8 @@ pub fn run(ui: &Ui, bindings: Bindings, commands: Sender<Command>, paths: &Paths
                     log::error!("{e:#}");
                     autostart_item.set_checked(!enable);
                 }
+            } else if id == update_item.id() {
+                updates::check(ui);
             } else if id == restart_item.id() {
                 restart = true;
                 let _ = commands.send(Command::Quit);

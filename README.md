@@ -16,7 +16,8 @@ with punctuation and capitalisation).
 | **Esc** while recording | Discard the recording |
 
 A tray icon shows the state (grey = ready, red = listening, amber = transcribing, blue =
-loading) and its menu has *Settings…*, *Open log*, *Start with Windows*, *Restart* and *Quit*.
+loading) and its menu has *Settings…*, *Open log*, *Start with Windows*, *Check for updates*,
+*Restart* and *Quit*.
 Short sounds mark start/stop (can be turned off).
 
 On first launch Dictum downloads the speech model (~670 MB, checksum-verified, resumable) to
@@ -76,8 +77,23 @@ clipboard, and your previous clipboard contents (all formats) are put back.
 
 Download `dictum-windows-x64.zip` from the latest release (or the latest CI run's artifacts),
 unzip it anywhere and run `dictum.exe`. The zip contains the exe plus the DLLs it needs (MSVC
-runtime, DirectML); nothing has to be installed. To publish a release: `git tag v0.1.0 && git
-push --tags`.
+runtime, DirectML); nothing has to be installed.
+
+## Updating
+
+Tray → *Check for updates* asks GitHub for the latest release; Dictum never checks on its own.
+If there is a newer version it shows the release notes and asks first. The zip is verified
+against the SHA-256 checksum GitHub publishes, the new files are swapped in next to the old ones
+(rolled back if anything fails) and Dictum restarts. Settings, vocabulary and the speech model
+live elsewhere and are kept.
+
+## Releasing
+
+1. Bump `version` in the root `Cargo.toml` (e.g. `0.3.0`) in a PR and merge it.
+2. Tag the merge commit: `git tag v0.3.0 && git push origin v0.3.0`.
+3. CI builds and tests everything, refuses to publish if the tag doesn't match `Cargo.toml`,
+   and creates the GitHub release with `dictum-windows-x64.zip` and generated notes.
+   *Check for updates* sees it from then on.
 
 > **Smart App Control / SmartScreen:** builds are not code-signed yet. If Smart App Control is
 > on, Windows blocks unsigned apps outright; it can only be allowed by turning Smart App Control

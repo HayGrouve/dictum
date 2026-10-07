@@ -43,6 +43,11 @@ Runtime ships prebuilt for Windows (with DirectML), macOS (with CoreML) and Linu
   default-device changes; mono mixdown in the callback.
 - **`app.rs`** — thread wiring, model download/load, status board → tray, safety nets (missed
   key-up watchdog, max recording length, accidental taps < 250 ms).
+- **`update.rs`** — on-demand updates from GitHub Releases (`releases/latest`): the asset is
+  checked against GitHub's SHA-256 `digest`, unpacked in memory, written as `*.dictum-new`, then
+  swapped in by renaming (allowed for the running exe and loaded DLLs) with the old files kept as
+  `*.dictum-old` until the next start; any failed rename rolls the swap back.
+  `platform/windows/updates.rs` runs it from the tray with message-box prompts and restarts.
 - **`platform/windows/`** — `WH_KEYBOARD_LL` hook (ignores our own injected input via a
   `dwExtraInfo` marker; injects an unassigned key so Win/Alt hotkeys don't open the Start menu),
   `SendInput` paste/typing, clipboard save/restore of every HGLOBAL format plus

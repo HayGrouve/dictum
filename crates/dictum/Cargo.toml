@@ -12,7 +12,10 @@ dictum-engine.workspace = true
 dirs = "6"
 log.workspace = true
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
 toml = "1"
+zip = { version = "8", default-features = false, features = ["deflate"] }
 
 [target.'cfg(any(windows, target_os = "macos"))'.dependencies]
 cpal = "0.18"
@@ -34,6 +37,7 @@ windows-sys = { version = "0.61", features = [
 
 [dev-dependencies]
 hound = "3.5"
+zip = { version = "8", default-features = false, features = ["deflate"] }
 
 [build-dependencies]
 embed-resource = "3"
