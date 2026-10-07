@@ -1,0 +1,94 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Pinned model revision; bump together with crates/dictum-engine/src/model.rs.
+  MODEL_CACHE_KEY: parakeet-tdt-0.6b-v3-int8-8f23f0c
+
+jobs:
+  lint:
+    name: Format + clippy (Linux and Windows targets)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+          targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo clippy --workspace --all-targets --target x86_64-pc-windows-msvc -- -D warnings
+
+  windows:
+    name: Windows build + tests (real model, real desktop)
+    runs-on: windows-latest
+    env:
+      DICTUM_MODEL_DIR: ${{ github.workspace }}\.models
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/cache@v4
+        with:
+          path: .models
+          key: ${{ env.MODEL_CACHE_KEY }}
+      - name: Unit + desktop integration tests
+        run: cargo test --release -p dictum -- --nocapture --test-threads=1
+      - name: Engine tests (accuracy + latency on real speech)
+        run: cargo test --release -p dictum-engine -- --nocapture --test-threads=1
+      - name: Build release
+        run: cargo build --release -p dictum
+      - name: Package
+        shell: pwsh
+        run: |
+          Get-ChildItem target\release -File | Format-Table Name, Length
+          New-Item -ItemType Directory dist | Out-Null
+          Copy-Item target\release\dictum.exe dist\
+          Get-ChildItem target\release -Filter *.dll | Copy-Item -Destination dist\
+          Copy-Item README.md, THIRD_PARTY_NOTICES.md dist\
+          Compress-Archive -Path dist\* -DestinationPath dictum-windows-x64.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dictum-windows-x64
+          path: dictum-windows-x64.zip
+
+  macos:
+    name: macOS (engine + core logic)
+    runs-on: macos-latest
+    env:
+      DICTUM_MODEL_DIR: ${{ github.workspace }}/.models
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/cache@v4
+        with:
+          path: .models
+          key: ${{ env.MODEL_CACHE_KEY }}
+      - run: cargo test --release --workspace -- --nocapture --test-threads=1
+
+  linux:
+    name: Linux tests (real model)
+    runs-on: ubuntu-latest
+    env:
+      DICTUM_MODEL_DIR: ${{ github.workspace }}/.models
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/cache@v4
+        with:
+          path: .models
+          key: ${{ env.MODEL_CACHE_KEY }}
+      - run: cargo test --release --workspace -- --nocapture --test-threads=1
