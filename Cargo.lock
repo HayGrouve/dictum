@@ -312,7 +312,7 @@ dependencies = [
 
 [[package]]
 name = "dictum"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "cpal",
@@ -341,7 +341,7 @@ dependencies = [
 
 [[package]]
 name = "dictum-engine"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "claxon",

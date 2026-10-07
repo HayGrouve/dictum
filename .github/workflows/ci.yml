@@ -117,13 +117,18 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: dictum-windows-x64
+      - uses: actions/download-artifact@v4
+        with:
+          name: dictum-macos-arm64
       - env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
-        run: gh release create "$TAG" dictum-windows-x64.zip --repo "$GITHUB_REPOSITORY" --title "Dictum $TAG" --generate-notes
+        run: |
+          gh release create "$TAG" dictum-windows-x64.zip dictum-macos-arm64.zip \
+            --repo "$GITHUB_REPOSITORY" --title "Dictum $TAG" --generate-notes
 
   macos:
-    name: macOS (engine + core logic)
+    name: macOS build + tests (real model)
     runs-on: macos-latest
     env:
       DICTUM_MODEL_DIR: ${{ github.workspace }}/.models
@@ -136,6 +141,39 @@ jobs:
           path: .models
           key: ${{ env.MODEL_CACHE_KEY }}
       - run: cargo test --workspace -- --nocapture --test-threads=1
+      # Releases must be signed with "Dictum Signing" so permissions survive updates; other
+      # builds (e.g. pull requests from forks, which get no secrets) fall back to ad hoc.
+      - name: Signing identity
+        env:
+          P12: ${{ secrets.MACOS_SIGNING_P12 }}
+          PASSWORD: ${{ secrets.MACOS_SIGNING_PASSWORD }}
+        run: |
+          if [ -z "$P12" ]; then
+            if [ "$GITHUB_REF_TYPE" = tag ]; then
+              echo "::error::MACOS_SIGNING_P12 is not set; releases must be signed (scripts/macos-signing-cert.sh)"
+              exit 1
+            fi
+            echo "no signing identity; the app will be signed ad hoc"
+            exit 0
+          fi
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          echo "$P12" | base64 --decode > "$RUNNER_TEMP/identity.p12"
+          security create-keychain -p "" "$keychain"
+          security set-keychain-settings "$keychain"
+          security unlock-keychain -p "" "$keychain"
+          security import "$RUNNER_TEMP/identity.p12" -k "$keychain" -P "$PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "" "$keychain" >/dev/null
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          rm "$RUNNER_TEMP/identity.p12"
+      - name: Build Dictum.app
+        run: |
+          scripts/macos-bundle.sh --zip
+          codesign --verify --strict --verbose=2 target/release/Dictum.app
+          codesign -d -r- target/release/Dictum.app
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dictum-macos-arm64
+          path: target/release/dictum-macos-arm64.zip
 
   linux:
     name: Linux tests (real model)

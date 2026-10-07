@@ -10,6 +10,7 @@ mod input;
 mod keys;
 mod settings;
 mod tap;
+mod updates;
 
 use std::cell::RefCell;
 use std::fs::File;
@@ -24,9 +25,10 @@ use dispatch2::DispatchQueue;
 use objc2::rc::Retained;
 use objc2::{AllocAnyThread, MainThreadMarker};
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSEvent, NSEventModifierFlags, NSEventType, NSSound,
+    NSAlert, NSAlertFirstButtonReturn, NSAlertStyle, NSApplication, NSApplicationActivationPolicy, NSEvent,
+    NSEventModifierFlags, NSEventType, NSSound,
 };
-use objc2_foundation::{NSData, NSPoint};
+use objc2_foundation::{NSData, NSPoint, NSString};
 use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
@@ -148,10 +150,33 @@ pub fn single_instance() -> Option<InstanceGuard> {
 
 /// The `.app` bundle we run from, if any.
 fn bundle_path() -> Option<PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    let bundle = exe.parent()?.parent()?.parent()?;
-    (exe.parent()?.ends_with("Contents/MacOS") && bundle.extension().is_some_and(|e| e == "app"))
-        .then(|| bundle.to_path_buf())
+    crate::update::app_bundle(&std::env::current_exe().ok()?)
+}
+
+/// Brings Dictum to the front (it has no Dock icon), e.g. for a window or an alert.
+fn activate(mtm: MainThreadMarker) {
+    let app = NSApplication::sharedApplication(mtm);
+    if objc2::runtime::NSObjectProtocol::respondsToSelector(&*app, objc2::sel!(activate)) {
+        app.activate();
+    } else {
+        #[allow(deprecated)]
+        app.activateIgnoringOtherApps(true);
+    }
+}
+
+/// Shows a message: its first paragraph as the title, the rest below. Returns whether the first
+/// button was chosen; without `buttons` there is just OK.
+fn alert(mtm: MainThreadMarker, message: &str, style: NSAlertStyle, buttons: &[&str]) -> bool {
+    activate(mtm);
+    let (title, details) = message.split_once("\n\n").unwrap_or((message, ""));
+    let alert = NSAlert::new(mtm);
+    alert.setAlertStyle(style);
+    alert.setMessageText(&NSString::from_str(title));
+    alert.setInformativeText(&NSString::from_str(details));
+    for button in buttons {
+        alert.addButtonWithTitle(&NSString::from_str(button));
+    }
+    alert.runModal() == NSAlertFirstButtonReturn
 }
 
 /// Sets up the app (menu bar only, no Dock icon) and the on-screen indicator if wanted. Must be
@@ -192,6 +217,7 @@ struct MainState {
     settings_item: MenuItem,
     log_item: MenuItem,
     autostart_item: CheckMenuItem,
+    update_item: MenuItem,
     restart_item: MenuItem,
     quit_item: MenuItem,
     /// The app's main menu: never shown, but it gives text fields Cmd+C/V/X/A/Z.
@@ -246,6 +272,9 @@ fn on_menu(id: &MenuId) {
                 log::error!("{e:#}");
                 main.autostart_item.set_checked(!enable);
             }
+            None
+        } else if id == main.update_item.id() {
+            updates::check(&main.ui);
             None
         } else if id == main.restart_item.id() {
             Some(true)
@@ -345,6 +374,8 @@ pub fn run(ui: &Ui, bindings: Bindings, commands: Sender<Command>, paths: &Paths
     let settings_item = MenuItem::new("Settings…", true, None);
     let log_item = MenuItem::new("Open log", true, None);
     let autostart_item = CheckMenuItem::new("Start at login", true, autostart::is_enabled(), None);
+    let update_item =
+        MenuItem::new(format!("Check for updates (v{})", crate::update::Version::current()), true, None);
     let restart_item = MenuItem::new("Restart", true, None);
     let quit_item = MenuItem::new("Quit Dictum", true, None);
     let menu = Menu::new();
@@ -354,6 +385,7 @@ pub fn run(ui: &Ui, bindings: Bindings, commands: Sender<Command>, paths: &Paths
         &settings_item,
         &log_item,
         &autostart_item,
+        &update_item,
         &PredefinedMenuItem::separator(),
         &restart_item,
         &quit_item,
@@ -391,6 +423,7 @@ pub fn run(ui: &Ui, bindings: Bindings, commands: Sender<Command>, paths: &Paths
             settings_item,
             log_item,
             autostart_item,
+            update_item,
             restart_item,
             quit_item,
             _main_menu: main_menu,
