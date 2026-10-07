@@ -4,6 +4,8 @@
 pub struct TextOptions {
     /// Drop hesitation sounds ("um", "uh", ...).
     pub remove_fillers: bool,
+    /// Drop stuttered repeats ("I I I want to" -> "I want to", "w- want" -> "want").
+    pub remove_stutters: bool,
     /// Turn spoken "new line" / "new paragraph" into line breaks.
     pub voice_commands: bool,
     /// Terms to write exactly as listed ("next.js", "turbo repo", "Shadn" -> "Next.js",
@@ -38,6 +40,9 @@ pub fn process(text: &str, options: &TextOptions) -> String {
     }
     if options.voice_commands {
         text = apply_voice_commands(&text);
+    }
+    if options.remove_stutters {
+        text = remove_stutters(&text);
     }
     if !options.vocabulary.is_empty() {
         text = apply_vocabulary(&text, &options.vocabulary);
@@ -96,6 +101,103 @@ fn remove_fillers(text: &str) -> String {
         }
     }
     out.join(" ")
+}
+
+/// Longest phrase collapsed when repeated ("in the in the house" -> "in the house").
+const MAX_STUTTER_WORDS: usize = 3;
+/// Words people double on purpose ("I had had enough", "very very good"); three or more in a row
+/// still collapse.
+const DOUBLED_ON_PURPOSE: &[&str] =
+    &["had", "that", "is", "do", "very", "really", "so", "no", "yes", "yeah", "bye", "ha", "knock"];
+
+/// Collapses a word or short phrase said several times in a row into one, and drops cut-off
+/// starts of the next word ("w- want"). Repeats across a full stop, or with digits, are kept.
+fn remove_stutters(text: &str) -> String {
+    // Repeats can nest ("the, the plan... the plan"): collapse until nothing changes.
+    let mut text = text.to_string();
+    loop {
+        let next = collapse_stutters(&text);
+        if next == text {
+            return text;
+        }
+        text = next;
+    }
+}
+
+fn collapse_stutters(text: &str) -> String {
+    let words: Vec<&str> = text.split(' ').filter(|w| !w.is_empty()).collect();
+    let mut out: Vec<String> = Vec::with_capacity(words.len());
+    let mut capitalize_next = false;
+    let mut i = 0;
+    while i < words.len() {
+        if let Some(next) = words.get(i + 1).filter(|next| is_cut_off(words[i], next)) {
+            // "W- want" -> "Want"
+            capitalize_next |= split_word(words[i]).core.starts_with(char::is_uppercase)
+                && !split_word(next).core.starts_with(char::is_uppercase);
+            i += 1;
+            continue;
+        }
+        let (n, copies) = (1..=MAX_STUTTER_WORDS)
+            .map(|n| (n, repeats(&words[i..], n)))
+            .find(|&(_, copies)| copies > 1)
+            .unwrap_or((1, 1));
+        for (k, raw) in words[i..i + n].iter().enumerate() {
+            let mut w = raw.to_string();
+            if k == n - 1 && copies > 1 {
+                // Keep the first copy, ending with the punctuation of the last one.
+                let first = split_word(raw);
+                let last = split_word(words[i + n * copies - 1]);
+                w = format!("{}{}{}", first.lead, first.core, last.trail);
+            }
+            if std::mem::take(&mut capitalize_next) {
+                w = capitalize_first(&w);
+            }
+            out.push(w);
+        }
+        i += n * copies;
+    }
+    out.join(" ")
+}
+
+/// How many times the first `n` words repeat back to back (1 when they don't).
+fn repeats(words: &[&str], n: usize) -> usize {
+    let same = |a: &str, b: &str| {
+        let (a, b) = (split_word(a), split_word(b));
+        !b.core.is_empty()
+            && !b.core.contains(|c: char| c.is_ascii_digit())
+            && b.lead.is_empty()
+            && a.core.to_lowercase() == b.core.to_lowercase()
+    };
+    let mut copies = 1;
+    while let Some(next) = words.get(n * copies..n * (copies + 1)) {
+        let previous = &words[n * (copies - 1)..n * copies];
+        // "Go. Go." is two sentences, not a stutter.
+        if !is_pause(split_word(previous[n - 1]).trail) || !previous.iter().zip(next).all(|(a, b)| same(a, b))
+        {
+            break;
+        }
+        copies += 1;
+    }
+    let word = split_word(words[0]).core.to_lowercase();
+    if n == 1 && copies == 2 && DOUBLED_ON_PURPOSE.contains(&word.as_str()) {
+        return 1;
+    }
+    copies
+}
+
+/// Punctuation that can sit between stuttered words: none, a comma, a dash or an ellipsis.
+fn is_pause(trail: &str) -> bool {
+    trail.is_empty() || trail == "..." || trail.chars().all(|c| matches!(c, ',' | '-' | '–' | '—' | '…'))
+}
+
+/// A word broken off with a dash that the next word completes: "w-" before "want".
+fn is_cut_off(raw: &str, next: &str) -> bool {
+    let (word, next) = (split_word(raw), split_word(next));
+    word.lead.is_empty()
+        && matches!(word.trail, "-" | "–" | "—")
+        && !word.core.is_empty()
+        && next.lead.is_empty()
+        && next.core.to_lowercase().starts_with(&word.core.to_lowercase())
 }
 
 /// Longest run of words considered for one vocabulary term ("p n p m" -> "pnpm").
@@ -309,6 +411,58 @@ mod tests {
         assert_eq!(process("Uh, um.", &fillers()), "");
     }
 
+    fn stutters() -> TextOptions {
+        TextOptions { remove_stutters: true, ..Default::default() }
+    }
+
+    #[test]
+    fn collapses_repeated_words() {
+        assert_eq!(process("I I I want to go.", &stutters()), "I want to go.");
+        assert_eq!(process("I, I, I want to go.", &stutters()), "I want to go.");
+        assert_eq!(process("So the the the plan is fine.", &stutters()), "So the plan is fine.");
+        assert_eq!(process("The, the plan... the plan works.", &stutters()), "The plan works.");
+        assert_eq!(process("It works, it works.", &stutters()), "It works.");
+    }
+
+    #[test]
+    fn collapses_repeated_phrases() {
+        assert_eq!(process("I want, I want to go.", &stutters()), "I want to go.");
+        assert_eq!(process("Put it in the in the box.", &stutters()), "Put it in the box.");
+    }
+
+    #[test]
+    fn drops_cut_off_words() {
+        assert_eq!(process("I w- want to go.", &stutters()), "I want to go.");
+        assert_eq!(process("W- we should go.", &stutters()), "We should go.");
+        assert_eq!(process("I- I think so.", &stutters()), "I think so.");
+        // Not a cut-off: the next word doesn't continue it.
+        assert_eq!(process("Pre- and post-war.", &stutters()), "Pre- and post-war.");
+    }
+
+    #[test]
+    fn keeps_deliberate_repeats() {
+        for t in [
+            "I had had enough.",
+            "That is very very good.",
+            "I know that that is true.",
+            "No. No.",
+            "Go. Go!",
+            "Call 5 5 5 now.",
+            "Bye bye.",
+            "He said \"go\" go.",
+        ] {
+            assert_eq!(process(t, &stutters()), t);
+        }
+        assert_eq!(process("No no no, not that.", &stutters()), "No, not that.");
+    }
+
+    #[test]
+    fn stutters_and_fillers_together() {
+        let o = TextOptions { remove_fillers: true, remove_stutters: true, ..Default::default() };
+        assert_eq!(process("I, um, I want to, uh, to go.", &o), "I want to go.");
+        assert_eq!(process("Um, I I want it.", &o), "I want it.");
+    }
+
     #[test]
     fn voice_commands_insert_breaks() {
         let o = TextOptions { voice_commands: true, ..Default::default() };
@@ -377,8 +531,14 @@ mod tests {
 
     #[test]
     fn non_ascii_text_passes_through() {
-        let o = TextOptions { remove_fillers: true, voice_commands: true, ..Default::default() };
+        let o = TextOptions {
+            remove_fillers: true,
+            remove_stutters: true,
+            voice_commands: true,
+            ..Default::default()
+        };
         assert_eq!(process("Здравей, свят!", &o), "Здравей, свят!");
+        assert_eq!(process("Аз аз искам това.", &o), "Аз искам това.");
     }
 
     #[test]

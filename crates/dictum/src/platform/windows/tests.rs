@@ -311,6 +311,15 @@ fn settings_window_saves_changes_into_the_file() {
     assert_eq!(selection(dialog, ID_INSERT), Some(0), "paste");
     assert_eq!(text(dialog, ID_VOCABULARY), "Vercel");
     assert_eq!(text(dialog, ID_REPLACEMENTS), "get hub = GitHub");
+    assert!(checked(dialog, ID_STUTTERS));
+    assert_eq!(text(dialog, ID_CONTROLS[0]), "Hold Right Ctrl and speak; release to insert the text.");
+    assert!(text(dialog, ID_CONTROLS[1]).contains("tap Space"));
+    assert!(text(dialog, ID_CONTROLS[2]).contains("Esc"));
+
+    step("the controls follow the hotkey being picked");
+    unsafe { SendDlgItemMessageW(dialog, ID_HOTKEY, CB_SETCURSEL, 0, 0) };
+    click(dialog, ID_HOTKEY | (CBN_SELCHANGE as i32) << 16);
+    assert!(text(dialog, ID_CONTROLS[1]).contains("press Ctrl+Win again"));
 
     step("choosing typing disables the clipboard option");
     let restore = unsafe { GetDlgItem(dialog, ID_RESTORE) };
@@ -323,6 +332,7 @@ fn settings_window_saves_changes_into_the_file() {
     set_text(dialog, ID_HOTKEY, "Ctrl+Shift+Space");
     check(dialog, ID_SOUNDS, false);
     check(dialog, ID_COMMANDS, true);
+    check(dialog, ID_STUTTERS, false);
     set_text(dialog, ID_VOCABULARY, "Vercel\r\nClaude Code\r\n");
     click(dialog, IDOK);
     assert_eq!(window::take_saved(), Some(true), "saved and asks for a restart");
@@ -331,7 +341,7 @@ fn settings_window_saves_changes_into_the_file() {
     let text = config.text();
     assert!(text.starts_with("# Mine\nhotkey = \"ctrl+shift+space\"\nthreads = 2\n"), "{text}");
     let saved = Config::parse(&text).unwrap();
-    assert!(!saved.sounds && saved.voice_commands && saved.remove_fillers);
+    assert!(!saved.sounds && saved.voice_commands && saved.remove_fillers && !saved.remove_stutters);
     assert_eq!(saved.insert_method, InsertMethod::Type);
     assert_eq!(saved.vocabulary, ["Vercel", "Claude Code"]);
     assert_eq!(saved.replacements.get("get hub").map(String::as_str), Some("GitHub"));
