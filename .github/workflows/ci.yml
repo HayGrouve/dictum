@@ -1,0 +1,143 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Tests use the dev profile; the engine crate is still built with opt-level 3 (Cargo.toml).
+  # Pinned model revision; bump together with crates/dictum-engine/src/model.rs.
+  MODEL_CACHE_KEY: parakeet-tdt-0.6b-v3-int8-8f23f0c
+
+jobs:
+  lint:
+    name: Format + clippy (Linux and Windows targets)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+          targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo clippy --workspace --all-targets --target x86_64-pc-windows-msvc -- -D warnings
+
+  windows:
+    name: Windows build + tests (real model, real desktop)
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      DICTUM_MODEL_DIR: ${{ github.workspace }}\.models
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/cache@v4
+        with:
+          path: .models
+          key: ${{ env.MODEL_CACHE_KEY }}
+      - name: App unit tests
+        timeout-minutes: 30
+        run: cargo test -p dictum -- --test-threads=1 --skip platform::windows::tests
+      - name: Desktop integration tests (clipboard, paste, typing, keyboard hook), 3 rounds
+        timeout-minutes: 10
+        shell: pwsh
+        run: |
+          foreach ($round in 1..3) {
+            Write-Host "--- round $round"
+            cargo test -p dictum platform::windows::tests -- --nocapture --test-threads=1
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+      - name: Engine tests (accuracy + latency on real speech)
+        timeout-minutes: 20
+        run: cargo test -p dictum-engine -- --nocapture --test-threads=1
+      - name: Build release
+        run: cargo build --release -p dictum
+      - name: Package
+        shell: pwsh
+        run: |
+          Get-ChildItem target\release -File | Format-Table Name, Length
+          New-Item -ItemType Directory dist | Out-Null
+          Copy-Item target\release\dictum.exe dist\
+          Get-ChildItem target\release -Filter *.dll | Copy-Item -Destination dist\
+          # ONNX Runtime is C++: ship the MSVC runtime next to the exe (app-local deployment),
+          # so Dictum runs without the VC++ Redistributable installed.
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          # Pick the newest runtime: app-local DLLs win over System32, so an old one could break.
+          $pattern = '\\MSVC\\(\d+\.\d+\.\d+)\\'
+          $runtime = & $vswhere -latest -find "VC\Redist\MSVC\*\x64\Microsoft.VC*.CRT\vcruntime140.dll" |
+            Where-Object { $_ -match $pattern } |
+            Sort-Object { [version]([regex]::Match($_, $pattern).Groups[1].Value) } -Descending |
+            Select-Object -First 1
+          if (-not $runtime) { throw "MSVC runtime not found" }
+          $crt = Split-Path $runtime
+          Write-Host "CRT: $crt ($((Get-Item $runtime).VersionInfo.FileVersion))"
+          Get-ChildItem $crt -Filter *.dll | Where-Object { $_.Name -match '^(msvcp140|vcruntime140)' } | Copy-Item -Destination dist\
+          $dumpbin = & $vswhere -latest -find "VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" | Select-Object -First 1
+          & $dumpbin /nologo /dependents dist\dictum.exe
+          Copy-Item README.md, THIRD_PARTY_NOTICES.md dist\
+          Get-ChildItem dist | Format-Table Name, Length
+          Compress-Archive -Path dist\* -DestinationPath dictum-windows-x64.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dictum-windows-x64
+          path: dictum-windows-x64.zip
+
+  release:
+    name: Publish release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [lint, windows, macos, linux]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dictum-windows-x64
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: gh release create "$TAG" dictum-windows-x64.zip --repo "$GITHUB_REPOSITORY" --title "Dictum $TAG" --generate-notes
+
+  macos:
+    name: macOS (engine + core logic)
+    runs-on: macos-latest
+    env:
+      DICTUM_MODEL_DIR: ${{ github.workspace }}/.models
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/cache@v4
+        with:
+          path: .models
+          key: ${{ env.MODEL_CACHE_KEY }}
+      - run: cargo test --workspace -- --nocapture --test-threads=1
+
+  linux:
+    name: Linux tests (real model)
+    runs-on: ubuntu-latest
+    env:
+      DICTUM_MODEL_DIR: ${{ github.workspace }}/.models
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/cache@v4
+        with:
+          path: .models
+          key: ${{ env.MODEL_CACHE_KEY }}
+      - run: cargo test --workspace -- --nocapture --test-threads=1

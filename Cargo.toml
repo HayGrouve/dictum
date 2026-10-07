@@ -1,0 +1,27 @@
+[workspace]
+resolver = "3"
+members = ["crates/dictum-engine", "crates/dictum"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+repository = "https://github.com/HayGrouve/dictum"
+rust-version = "1.88"
+
+[workspace.dependencies]
+dictum-engine = { path = "crates/dictum-engine" }
+anyhow = "1"
+log = { version = "0.4", features = ["std"] }
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+# Inference speed matters even while iterating; keep the engine optimised in dev/test builds.
+[profile.dev.package.dictum-engine]
+opt-level = 3
+
+[profile.test.package.dictum-engine]
+opt-level = 3
