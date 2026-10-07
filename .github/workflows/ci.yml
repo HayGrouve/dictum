@@ -16,6 +16,7 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # Tests use the dev profile; the engine crate is still built with opt-level 3 (Cargo.toml).
   # Pinned model revision; bump together with crates/dictum-engine/src/model.rs.
   MODEL_CACHE_KEY: parakeet-tdt-0.6b-v3-int8-8f23f0c
 
@@ -48,9 +49,9 @@ jobs:
           path: .models
           key: ${{ env.MODEL_CACHE_KEY }}
       - name: Unit + desktop integration tests
-        run: cargo test --release -p dictum -- --nocapture --test-threads=1
+        run: cargo test -p dictum -- --nocapture --test-threads=1
       - name: Engine tests (accuracy + latency on real speech)
-        run: cargo test --release -p dictum-engine -- --nocapture --test-threads=1
+        run: cargo test -p dictum-engine -- --nocapture --test-threads=1
       - name: Build release
         run: cargo build --release -p dictum
       - name: Package
@@ -107,7 +108,7 @@ jobs:
         with:
           path: .models
           key: ${{ env.MODEL_CACHE_KEY }}
-      - run: cargo test --release --workspace -- --nocapture --test-threads=1
+      - run: cargo test --workspace -- --nocapture --test-threads=1
 
   linux:
     name: Linux tests (real model)
@@ -122,4 +123,4 @@ jobs:
         with:
           path: .models
           key: ${{ env.MODEL_CACHE_KEY }}
-      - run: cargo test --release --workspace -- --nocapture --test-threads=1
+      - run: cargo test --workspace -- --nocapture --test-threads=1
