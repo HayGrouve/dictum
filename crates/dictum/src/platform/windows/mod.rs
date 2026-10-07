@@ -4,6 +4,7 @@
 mod autostart;
 mod clipboard;
 mod hook;
+mod indicator;
 mod input;
 mod keys;
 mod settings;
@@ -38,6 +39,7 @@ pub use keys::hotkey_held;
 use crate::app::Command;
 use crate::config::{Bindings, InsertMethod};
 use crate::hotkey::Machine;
+use crate::indicator::{Meter, Phase};
 use crate::paths::Paths;
 use crate::ui::{Cue, Status};
 
@@ -49,12 +51,15 @@ const WM_RESTART: u32 = WM_APP + 3;
 #[derive(Clone)]
 pub struct Ui {
     hwnd: usize,
+    /// The on-screen indicator window; 0 when it is turned off.
+    indicator: usize,
     shared: Arc<Shared>,
 }
 
 struct Shared {
     sounds: bool,
     status: Mutex<(Status, String)>,
+    meter: Arc<Mutex<Meter>>,
 }
 
 impl Ui {
@@ -62,9 +67,20 @@ impl Ui {
         self.hwnd as HWND
     }
 
-    pub fn set_status(&self, status: Status, tooltip: String) {
+    pub fn set_status(&self, status: Status, tooltip: String, phase: Phase) {
         *self.shared.status.lock().unwrap() = (status, tooltip);
         unsafe { PostMessageW(self.hwnd(), WM_STATUS, 0, 0) };
+        if self.indicator != 0 {
+            let wparam = indicator::phase_to_wparam(phase);
+            unsafe { PostMessageW(self.indicator as HWND, indicator::WM_PHASE, wparam, 0) };
+        }
+    }
+
+    /// Microphone samples for the indicator's level bars.
+    pub fn level(&self, samples: &[f32]) {
+        if self.indicator != 0 {
+            self.shared.meter.lock().unwrap().feed(samples);
+        }
     }
 
     pub fn cue(&self, cue: Cue) {
@@ -126,13 +142,26 @@ pub fn single_instance() -> Option<InstanceGuard> {
     Some(InstanceGuard(handle))
 }
 
-/// Creates the hidden window that receives status updates and owns the clipboard.
-/// Must be called on the thread that later calls [`run`].
-pub fn create_ui(sounds: bool) -> Result<Ui> {
+/// Creates the hidden window that receives status updates and owns the clipboard, and the
+/// on-screen indicator if wanted. Must be called on the thread that later calls [`run`].
+pub fn create_ui(sounds: bool, show_indicator: bool) -> Result<Ui> {
     let hwnd = create_message_window()?;
+    let meter = Arc::new(Mutex::new(Meter::default()));
+    let indicator = if show_indicator {
+        match indicator::create(meter.clone()) {
+            Ok(hwnd) => hwnd as usize,
+            Err(e) => {
+                log::warn!("{e:#}");
+                0
+            }
+        }
+    } else {
+        0
+    };
     Ok(Ui {
         hwnd: hwnd as usize,
-        shared: Arc::new(Shared { sounds, status: Mutex::new((Status::Loading, "Dictum".into())) }),
+        indicator,
+        shared: Arc::new(Shared { sounds, status: Mutex::new((Status::Loading, "Dictum".into())), meter }),
     })
 }
 

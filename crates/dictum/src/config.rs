@@ -46,6 +46,7 @@ pub struct Config {
     pub remove_fillers: bool,
     pub voice_commands: bool,
     pub sounds: bool,
+    pub indicator: bool,
     pub microphone: String,
     pub device: DeviceSetting,
     pub threads: usize,
@@ -67,6 +68,7 @@ impl Default for Config {
             remove_fillers: true,
             voice_commands: false,
             sounds: true,
+            indicator: true,
             microphone: String::new(),
             device: DeviceSetting::Cpu,
             threads: 0,
@@ -176,6 +178,7 @@ fn edit(text: &str, from: &Config, to: &Config) -> Result<String> {
     set("remove_fillers", from.remove_fillers != to.remove_fillers, to.remove_fillers.into());
     set("voice_commands", from.voice_commands != to.voice_commands, to.voice_commands.into());
     set("sounds", from.sounds != to.sounds, to.sounds.into());
+    set("indicator", from.indicator != to.indicator, to.indicator.into());
     set("microphone", from.microphone != to.microphone, to.microphone.as_str().into());
     set("vocabulary", from.vocabulary != to.vocabulary, string_array(&to.vocabulary));
 
@@ -253,6 +256,9 @@ voice_commands = false
 
 # Short sounds when recording starts and stops.
 sounds = true
+
+# A small bar at the bottom of the screen while Dictum listens (with live levels) and transcribes.
+indicator = true
 
 # Microphone to use: empty for the system default, or part of the device name.
 microphone = ""
