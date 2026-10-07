@@ -32,14 +32,20 @@ struct Open;
 
 impl Open {
     fn new(owner: HWND) -> Result<Self> {
-        // Another app may hold the clipboard for a moment.
-        for _ in 0..25 {
+        // Other apps hold the clipboard briefly (pasting, clipboard managers, remote desktop);
+        // keep trying for about a second.
+        let deadline = Instant::now() + Duration::from_millis(1000);
+        let mut wait = Duration::from_millis(2);
+        loop {
             if unsafe { OpenClipboard(owner) } != 0 {
                 return Ok(Open);
             }
-            sleep(Duration::from_millis(8));
+            if Instant::now() >= deadline {
+                bail!("the clipboard is locked by another application");
+            }
+            sleep(wait);
+            wait = (wait * 2).min(Duration::from_millis(50));
         }
-        bail!("the clipboard is locked by another application")
     }
 }
 

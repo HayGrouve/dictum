@@ -39,15 +39,20 @@ Use tray → *Restart* after editing.
 
 ## Performance
 
-Measured by `cargo test --release -p dictum-engine --test accuracy` (4 vCPU slice of a
-Ryzen 5 5600G under WSL; native Windows on the full CPU is faster):
+Measured by `cargo test --release -p dictum-engine --test accuracy` (same results in CI on
+Windows, macOS and Linux):
 
 | | |
 | --- | --- |
 | Accuracy (LibriSpeech dev-clean sample + JFK) | **2.5 % WER** |
-| Speed | **~20× faster than real time** on CPU (11 s of speech → 0.57 s) |
-| Text ready after you release the key, typical dictation | **≈ 0 ms** — transcribed speculatively while you pause |
+| Speed (4 vCPU slice of a Ryzen 5 5600G, WSL) | **~19× faster than real time** on CPU (11 s of speech → 0.57 s) |
+| Speed (GitHub's Windows runner, 4 vCPU) | ~6× faster than real time (11 s → 1.9 s) |
+| Text ready after you release the key, typical dictation | **≈ 0 ms** (measured 12–615 µs) — transcribed speculatively while you pause |
 | 150 s continuous dictation | split at pauses and transcribed while you talk; ≈ 0 ms left at release, 3.1 % WER |
+
+Inference speed scales with physical cores (ONNX Runtime uses one thread per core by default;
+override with `threads`). Speculation makes it matter little for typical dictation: the text is
+usually ready before you let go of the key.
 
 How: the model stays loaded and warmed up; the microphone stream stays open but paused (so
 starting costs milliseconds and Windows doesn't show the mic as in use); Silero VAD trims silence

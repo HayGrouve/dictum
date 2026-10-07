@@ -347,15 +347,19 @@ pub fn insert_text(ui: &Ui, text: &str, method: InsertMethod, restore_clipboard:
             clipboard::offer_text(owner, text)?;
             clipboard::arm();
             input::paste()?;
-            // Restore as soon as the target app has read the text (or give up waiting).
+            // Restore as soon as the target app has read the text (or give up waiting). The app
+            // is still inside its paste with the clipboard open when it asks for the data.
             let (consumed, sequence) = clipboard::wait_consumed(Duration::from_millis(1500));
-            if !consumed {
+            if consumed {
+                std::thread::sleep(Duration::from_millis(30));
+            } else {
                 log::warn!("the focused app did not read the pasted text");
             }
-            if clipboard::sequence() == sequence {
-                clipboard::restore(owner, &saved)?;
-            } else {
+            if clipboard::sequence() != sequence {
                 log::debug!("clipboard changed after paste; not restoring");
+            } else if let Err(e) = clipboard::restore(owner, &saved) {
+                // The text is already in place; only the old clipboard couldn't be put back.
+                log::warn!("could not restore the clipboard: {e:#}");
             }
             Ok(())
         }
