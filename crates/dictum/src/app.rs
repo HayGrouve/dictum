@@ -16,11 +16,12 @@ use dictum_engine::{Parakeet, Vad};
 
 use crate::audio::Mic;
 use crate::config::{Bindings, Config};
-use crate::hotkey::{Action, Hotkey};
+use crate::hotkey::{Action, Hotkey, Style};
 use crate::indicator::Phase;
 use crate::paths::Paths;
-use crate::pipeline::{Dictation, Done, SpecControl, Stopped, Worker};
+use crate::pipeline::{Dictation, Done, SessionId, SpecControl, Stopped, Worker};
 use crate::platform::{self, Ui};
+use crate::polish::{Pending, Polisher};
 use crate::ui::{Cue, Status};
 
 #[derive(Debug)]
@@ -95,14 +96,32 @@ pub fn run() -> Result<()> {
         bindings.hands_free,
         bindings.cancel
     );
+    let mut polish_error = None;
+    let polisher = match &bindings.polish {
+        None => None,
+        Some(hotkey) => match Polisher::from_config(&config.polish, &config.vocabulary) {
+            Ok(polisher) => {
+                log::info!("polish hotkey: {hotkey} (model {})", config.polish.model);
+                Some(polisher)
+            }
+            Err(e) => {
+                log::error!("polish hotkey {hotkey} inserts plain text: {e:#}");
+                polish_error = Some(format!("polish unavailable ({e})"));
+                None
+            }
+        },
+    };
 
     let ui = platform::create_ui(config.sounds, config.indicator)?;
     let board = Arc::new(Board {
         ui: ui.clone(),
-        hotkey: bindings.hotkey.to_string(),
+        hotkey: match &bindings.polish {
+            Some(polish) => format!("{} (or {polish} for a polished prompt)", bindings.hotkey),
+            None => bindings.hotkey.to_string(),
+        },
         state: Mutex::new(BoardState {
             loading: Some("starting…".into()),
-            error: config_error,
+            error: config_error.or(polish_error),
             ..Default::default()
         }),
     });
@@ -141,7 +160,9 @@ pub fn run() -> Result<()> {
             };
             ready.store(true, Ordering::SeqCst);
             board.update(|s| s.loading = None);
-            Worker::new(engine, spec, config.text_options(), config.trailing_space).run(job_rx, done_tx);
+            Worker::new(engine, spec, config.text_options(), config.trailing_space)
+                .with_polisher(polisher)
+                .run(job_rx, done_tx);
         });
     }
 
@@ -152,7 +173,13 @@ pub fn run() -> Result<()> {
         let ui = ui.clone();
         spawn("output", move || {
             for done in done_rx {
-                if let Some(text) = done.text {
+                let text = match (done.text, done.polish) {
+                    (Some(plain), Some(pending)) => {
+                        Some(polished_or_plain(done.session, plain, pending, &ui))
+                    }
+                    (text, _) => text,
+                };
+                if let Some(text) = text {
                     platform::wait_for_modifiers_released(Duration::from_millis(1500));
                     let started = Instant::now();
                     match platform::insert_text(&ui, &text, config.insert_method, config.restore_clipboard) {
@@ -179,7 +206,7 @@ pub fn run() -> Result<()> {
     {
         let board = board.clone();
         let ui = ui.clone();
-        let hotkey = bindings.hotkey.clone();
+        let hotkeys = Hotkeys { plain: bindings.hotkey.clone(), polish: bindings.polish.clone() };
         let config = config.clone();
         spawn("controller", move || {
             let vad = match Vad::new() {
@@ -191,7 +218,18 @@ pub fn run() -> Result<()> {
             };
             let dictation = Dictation::new(job_tx, spec, vad);
             let mic = Mic::new(&config.microphone);
-            Controller { config, hotkey, ui, board, ready, mic, dictation, mode: Mode::Idle }.run(cmd_rx);
+            Controller {
+                config,
+                hotkeys,
+                style: Style::Plain,
+                ui,
+                board,
+                ready,
+                mic,
+                dictation,
+                mode: Mode::Idle,
+            }
+            .run(cmd_rx);
         });
     }
 
@@ -204,6 +242,28 @@ pub fn run() -> Result<()> {
         log::info!("quitting");
     }
     Ok(())
+}
+
+/// The rewrite if it arrives in time, otherwise the plain text.
+fn polished_or_plain(session: SessionId, plain: String, pending: Pending, ui: &Ui) -> String {
+    let started = Instant::now();
+    match pending.wait() {
+        Ok(mut polished) => {
+            log::info!(
+                "dictation {session}: polished text arrived {:.0?} after the transcript",
+                started.elapsed()
+            );
+            if plain.ends_with(char::is_whitespace) {
+                polished.push(' ');
+            }
+            polished
+        }
+        Err(e) => {
+            log::warn!("dictation {session}: polish failed, inserting the plain text: {e:#}");
+            ui.cue(Cue::Error);
+            plain
+        }
+    }
 }
 
 /// The previous version's files can stay locked for a moment after an update restart.
@@ -261,9 +321,16 @@ const MIN_HOLD: Duration = Duration::from_millis(250);
 /// Hotkey physically up this long without a release event from the hook: stop anyway.
 const MISSED_RELEASE: Duration = Duration::from_millis(500);
 
+struct Hotkeys {
+    plain: Hotkey,
+    polish: Option<Hotkey>,
+}
+
 struct Controller {
     config: Config,
-    hotkey: Hotkey,
+    hotkeys: Hotkeys,
+    /// Style of the current (or last) recording.
+    style: Style,
     ui: Ui,
     board: Arc<Board>,
     ready: Arc<AtomicBool>,
@@ -300,10 +367,10 @@ impl Controller {
             }
             // Safety net: a missed key-up must not leave the mic on forever. Normal releases
             // arrive from the hook within milliseconds, long before this fires.
-            if matches!(self.mode, Mode::Holding { .. }) && !platform::hotkey_held(&self.hotkey) {
+            if matches!(self.mode, Mode::Holding { .. }) && !platform::hotkey_held(self.hotkey()) {
                 let since = *released_since.get_or_insert_with(Instant::now);
                 if since.elapsed() >= MISSED_RELEASE {
-                    log::warn!("hotkey no longer held but no release seen; stopping");
+                    log::warn!("hotkey {} no longer held but no release seen; stopping", self.hotkey());
                     released_since = None;
                     self.ui.reset_hotkey();
                     self.on_action(Action::Stop);
@@ -319,9 +386,23 @@ impl Controller {
         }
     }
 
+    /// The hotkey that started the current recording.
+    fn hotkey(&self) -> &Hotkey {
+        match (self.style, &self.hotkeys.polish) {
+            (Style::Polish, Some(polish)) => polish,
+            _ => &self.hotkeys.plain,
+        }
+    }
+
     fn on_action(&mut self, action: Action) {
         match action {
-            Action::Start => self.start(),
+            // A longer hotkey completed right after the start: same recording, other style.
+            Action::Start(style) if self.dictation.is_recording() => {
+                self.style = style;
+                self.dictation.set_style(style);
+                log::debug!("switched to {style:?}");
+            }
+            Action::Start(style) => self.start(style),
             Action::LockHandsFree => {
                 if self.dictation.is_recording() {
                     self.mode = Mode::HandsFree;
@@ -346,7 +427,7 @@ impl Controller {
         }
     }
 
-    fn start(&mut self) {
+    fn start(&mut self, style: Style) {
         if !self.ready.load(Ordering::SeqCst) {
             self.ui.cue(Cue::Error);
             log::warn!("dictation requested before the speech model is ready");
@@ -354,7 +435,9 @@ impl Controller {
         }
         match self.mic.start() {
             Ok(rate) => {
-                self.dictation.start(rate);
+                self.style = style;
+                self.dictation.start(rate, style);
+                log::debug!("recording started with {} ({style:?})", self.hotkey());
                 self.mode = Mode::Holding { since: Instant::now() };
                 self.board.update(|s| s.recording = true);
                 self.ui.cue(Cue::Start);
@@ -384,6 +467,7 @@ impl Controller {
             let _ = self.dictation.feed(&chunk);
         }
         let recorded = self.dictation.recorded();
+        let kind = if self.style == Style::Polish { " for a polished prompt" } else { "" };
         self.mode = Mode::Idle;
         let stopped = self.dictation.stop();
         self.board.update(|s| {
@@ -398,11 +482,11 @@ impl Controller {
         match stopped {
             Ok(Stopped::Pending(_)) => {
                 self.ui.cue(Cue::Stop);
-                log::info!("recorded {:.1}s", recorded.as_secs_f64());
+                log::info!("recorded {:.1}s{kind}", recorded.as_secs_f64());
             }
             Ok(Stopped::NoSpeech) => {
                 self.ui.cue(Cue::Cancel);
-                log::info!("recorded {:.1}s without speech", recorded.as_secs_f64());
+                log::info!("recorded {:.1}s{kind} without speech", recorded.as_secs_f64());
             }
             Err(e) => {
                 self.ui.cue(Cue::Error);

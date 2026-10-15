@@ -12,6 +12,7 @@ mod hotkey;
 mod icons;
 mod indicator;
 mod pipeline;
+mod polish;
 mod settings;
 mod sounds;
 mod ui;

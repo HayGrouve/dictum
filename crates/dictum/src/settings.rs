@@ -21,11 +21,25 @@ pub const HOTKEY_PRESETS: [&str; 5] = if cfg!(target_os = "macos") {
 
 const HOTKEY_HINT: &str = "Pick one from the list, or type keys joined by “+”, like ctrl+shift+space.";
 
+/// Offered for the polish hotkey, after [`POLISH_OFF`]. A preset that contains the dictation
+/// hotkey (`fn+shift` with `fn`) works when the extra key follows within 300 ms.
+pub const POLISH_PRESETS: [&str; 5] = if cfg!(target_os = "macos") {
+    ["right_option", "right_cmd", "fn+shift", "ctrl+option", "ctrl+shift+space"]
+} else {
+    ["right_alt", "right_ctrl", "ctrl+win+shift", "ctrl+alt+space", "f14"]
+};
+
+/// The first entry of the polish hotkey list: no polish hotkey.
+pub const POLISH_OFF: &str = "Off";
+
 /// The insert method choices, in [`InsertMethod`] order: paste, type.
 const INSERT_METHODS: [&str; 2] =
     ["Pasting (fast; your clipboard is kept)", "Typing (never touches the clipboard)"];
 
 const AUTOSTART: &str = if cfg!(windows) { "Start with Windows" } else { "Start at login" };
+
+/// Shown in the empty API key field.
+pub const API_KEY_PLACEHOLDER: &str = "Paste your Anthropic API key";
 
 pub const CONTROLS_TITLE: &str = "Controls";
 pub const CONTROLS_NOTE: &str = "The hands-free and cancel keys can be changed in the config file.";
@@ -42,17 +56,19 @@ const NEWLINE: &str = if cfg!(windows) { "\r\n" } else { "\n" };
 pub enum Section {
     Dictation,
     Text,
+    Polish,
     Vocabulary,
 }
 
 impl Section {
     /// In the order the window shows them.
-    pub const ALL: [Section; 3] = [Section::Dictation, Section::Text, Section::Vocabulary];
+    pub const ALL: [Section; 4] = [Section::Dictation, Section::Text, Section::Polish, Section::Vocabulary];
 
     pub fn title(self) -> &'static str {
         match self {
             Section::Dictation => "Dictation",
             Section::Text => "Text",
+            Section::Polish => "Polished prompts",
             Section::Vocabulary => "Vocabulary",
         }
     }
@@ -64,6 +80,7 @@ impl Section {
             Section::Text => {
                 &[InsertMethod, RestoreClipboard, RemoveFillers, RemoveStutters, VoiceCommands, TrailingSpace]
             }
+            Section::Polish => &[PolishHotkey, ApiKey],
             Section::Vocabulary => &[Vocabulary, Replacements],
         }
     }
@@ -83,6 +100,8 @@ pub enum Field {
     RemoveStutters,
     VoiceCommands,
     TrailingSpace,
+    PolishHotkey,
+    ApiKey,
     Vocabulary,
     Replacements,
 }
@@ -99,6 +118,11 @@ pub enum Control {
     },
     Check {
         label: &'static str,
+    },
+    /// One line of text, with `placeholder` shown while it is empty.
+    Text {
+        label: &'static str,
+        placeholder: &'static str,
     },
     /// Multi-line text, explained by `label` above it.
     Lines {
@@ -121,6 +145,8 @@ impl Field {
             Field::RemoveStutters => check("Remove stutters (“I I I want” → “I want”)"),
             Field::VoiceCommands => check("Voice commands: “new line”, “new paragraph”"),
             Field::TrailingSpace => check("Add a space after each dictation"),
+            Field::PolishHotkey => Control::Choice { label: "Ho&tkey:", editable: true },
+            Field::ApiKey => Control::Text { label: "API &key:", placeholder: API_KEY_PLACEHOLDER },
             Field::Vocabulary => Control::Lines {
                 label: "&Words and names recognition tends to get wrong, one per line, spelled the way you \
                         want them:",
@@ -207,6 +233,9 @@ impl Form {
     pub fn options(&self, field: Field) -> Vec<String> {
         match field {
             Field::Hotkey => HOTKEY_PRESETS.iter().map(|spec| hotkey_label(spec)).collect(),
+            Field::PolishHotkey => std::iter::once(POLISH_OFF.to_string())
+                .chain(POLISH_PRESETS.iter().map(|spec| hotkey_label(spec)))
+                .collect(),
             Field::Microphone => microphone_choices(&self.original.microphone, None)
                 .0
                 .into_iter()
@@ -235,6 +264,11 @@ impl Form {
             Field::RemoveStutters => Value::Check(c.remove_stutters),
             Field::VoiceCommands => Value::Check(c.voice_commands),
             Field::TrailingSpace => Value::Check(c.trailing_space),
+            Field::PolishHotkey => Value::Text(match c.polish.hotkey.trim() {
+                "" => POLISH_OFF.to_string(),
+                spec => hotkey_label(spec),
+            }),
+            Field::ApiKey => Value::Text(masked_key(&c.polish.api_key)),
             Field::Vocabulary => Value::Text(vocabulary_text(&c.vocabulary)),
             Field::Replacements => Value::Text(replacements_text(&c.replacements)),
         }
@@ -250,11 +284,13 @@ impl Form {
         (labels, selected)
     }
 
-    /// The "Controls" lines for the hotkey in the window; `None` while it is not a valid hotkey
+    /// The "Controls" lines for the hotkeys in the window; `None` while one is not a valid hotkey
     /// (still being typed), when the lines should stay as they are.
-    pub fn controls(&self, hotkey: &str) -> Option<[String; 3]> {
+    pub fn controls(&self, hotkey: &str, polish: &str) -> Option<[String; CONTROLS_LINES]> {
         Hotkey::parse(hotkey).ok()?;
-        Some(controls_help(hotkey, &self.original.hands_free_key, &self.original.cancel_key))
+        let polish = polish_hotkey_spec(polish, "").ok()?;
+        let polish = (!polish.is_empty()).then_some(polish.as_str());
+        Some(controls_help(hotkey, polish, &self.original.hands_free_key, &self.original.cancel_key))
     }
 
     /// Whether a field can be changed, given what the window shows.
@@ -297,6 +333,16 @@ impl Form {
             Field::RemoveStutters => c.remove_stutters = value.check(),
             Field::VoiceCommands => c.voice_commands = value.check(),
             Field::TrailingSpace => c.trailing_space = value.check(),
+            Field::PolishHotkey => {
+                c.polish.hotkey = polish_hotkey_spec(value.text(), &self.original.polish.hotkey)
+                    .map_err(|e| Problem::new(field, format!("{e:#}\n\n{HOTKEY_HINT}")))?;
+                // The dictation hotkey was read before this one.
+                c.bindings().map_err(|e| Problem::new(field, format!("{e:#}")))?;
+            }
+            Field::ApiKey => {
+                c.polish.api_key = api_key(value.text(), &self.original.polish.api_key)
+                    .map_err(|e| Problem::new(field, format!("{e:#}")))?;
+            }
             Field::Vocabulary => c.vocabulary = parse_vocabulary(value.text()),
             Field::Replacements => {
                 c.replacements =
@@ -337,14 +383,32 @@ pub fn hotkey_label(spec: &str) -> String {
     Hotkey::parse(spec).map_or_else(|_| spec.to_string(), |h| h.to_string())
 }
 
-/// The "Controls" lines: how to dictate, go hands-free and cancel with the configured keys.
-pub fn controls_help(hotkey: &str, hands_free_key: &str, cancel_key: &str) -> [String; 3] {
+/// How many lines [`controls_help`] returns.
+pub const CONTROLS_LINES: usize = 4;
+
+/// The "Controls" lines: how to dictate, dictate a polished prompt, go hands-free and cancel with
+/// the configured keys.
+pub fn controls_help(
+    hotkey: &str,
+    polish: Option<&str>,
+    hands_free_key: &str,
+    cancel_key: &str,
+) -> [String; CONTROLS_LINES] {
     let key = |spec: &str| hotkey::parse_key(spec).map_or_else(|_| spec.to_string(), hotkey::key_name);
     let hotkey = hotkey_label(hotkey);
     [
         format!("Hold {hotkey} and speak; release to insert the text."),
+        match polish {
+            Some(polish) => format!(
+                "Hold {} instead for a polished prompt: cleaned up and structured by Claude.",
+                hotkey_label(polish)
+            ),
+            None => {
+                "Pick a hotkey under “Polished prompts” to also dictate prompts Claude cleans up.".to_string()
+            }
+        },
         format!(
-            "While holding, tap {} to keep recording hands-free; press {hotkey} again to finish.",
+            "While holding, tap {} to keep recording hands-free; press the hotkey again to finish.",
             key(hands_free_key)
         ),
         format!("Press {} while recording to discard it.", key(cancel_key)),
@@ -354,14 +418,54 @@ pub fn controls_help(hotkey: &str, hands_free_key: &str, cancel_key: &str) -> [S
 /// Reads the hotkey field back into a spec. `current` is kept as written when the field still
 /// means the same hotkey; presets are written the way they are listed.
 pub fn hotkey_spec(text: &str, current: &str) -> Result<String> {
+    spec_from(text, current, &HOTKEY_PRESETS)
+}
+
+/// Reads the polish hotkey field back into a spec, like [`hotkey_spec`]; [`POLISH_OFF`] or an
+/// empty field is no polish hotkey (an empty spec).
+pub fn polish_hotkey_spec(text: &str, current: &str) -> Result<String> {
+    let text = text.trim();
+    if text.is_empty() || text.eq_ignore_ascii_case(POLISH_OFF) {
+        return Ok(String::new());
+    }
+    spec_from(text, current, &POLISH_PRESETS)
+}
+
+fn spec_from(text: &str, current: &str, presets: &[&str]) -> Result<String> {
     let hotkey = Hotkey::parse(text).with_context(|| format!("“{}” is not a valid hotkey", text.trim()))?;
     if Hotkey::parse(current).is_ok_and(|c| c == hotkey) {
         return Ok(current.to_string());
     }
-    if let Some(preset) = HOTKEY_PRESETS.iter().find(|p| Hotkey::parse(p).is_ok_and(|p| p == hotkey)) {
+    if let Some(preset) = presets.iter().find(|p| Hotkey::parse(p).is_ok_and(|p| p == hotkey)) {
         return Ok(preset.to_string());
     }
     Ok(text.split('+').map(|p| p.trim().to_ascii_lowercase().replace(' ', "_")).collect::<Vec<_>>().join("+"))
+}
+
+/// How the API key is shown: its first half, then a star for each hidden character. Enough to
+/// tell that a key is there (and which), not enough to read it over a shoulder.
+pub fn masked_key(key: &str) -> String {
+    let shown = key.chars().count() / 2;
+    key.chars().enumerate().map(|(i, c)| if i < shown { c } else { '*' }).collect()
+}
+
+/// Reads the API key field back. The masked key as shown means "keep the current one"; anything
+/// else is a newly pasted key, and an empty field removes it.
+pub fn api_key(text: &str, current: &str) -> Result<String> {
+    let text = text.trim();
+    if !current.is_empty() && text == masked_key(current) {
+        return Ok(current.to_string());
+    }
+    if text.contains('*') {
+        bail!("Paste the whole API key: the field still has stars from the hidden one. Clear it first.");
+    }
+    if text.chars().any(char::is_whitespace) {
+        bail!("An API key has no spaces or line breaks in it.");
+    }
+    if text.starts_with(config::KEY_ID_PREFIX) {
+        bail!("{}", config::KEY_ID_HINT);
+    }
+    Ok(text.to_string())
 }
 
 /// Entries for the microphone drop-down as (label, setting), and the one to select. `devices` is
@@ -456,12 +560,48 @@ mod tests {
 
     #[test]
     fn controls_help_names_the_keys() {
-        let [hold, hands_free, cancel] = controls_help("right_ctrl", "space", "escape");
+        let [hold, polish, hands_free, cancel] = controls_help("right_ctrl", None, "space", "escape");
         assert_eq!(hold, "Hold Right Ctrl and speak; release to insert the text.");
-        assert!(hands_free.contains("tap Space") && hands_free.contains("press Right Ctrl again"));
+        assert!(polish.contains("Pick a hotkey"));
+        assert!(hands_free.contains("tap Space") && hands_free.contains("press the hotkey again"));
         assert_eq!(cancel, "Press Esc while recording to discard it.");
-        let [_, hands_free, _] = controls_help("ctrl+shift+space", "f9", "esc");
-        assert!(hands_free.contains("tap F9") && hands_free.contains("press Ctrl+Shift+Space again"));
+        let [_, polish, hands_free, _] = controls_help("ctrl+shift+space", Some("right_alt"), "f9", "esc");
+        assert!(polish.starts_with("Hold Right ") && polish.contains("polished prompt"));
+        assert!(hands_free.contains("tap F9"));
+    }
+
+    #[test]
+    fn polish_hotkey_round_trip() {
+        for spec in POLISH_PRESETS {
+            assert_eq!(polish_hotkey_spec(&hotkey_label(spec), "").unwrap(), spec);
+        }
+        assert_eq!(polish_hotkey_spec(POLISH_OFF, "right_alt").unwrap(), "");
+        assert_eq!(polish_hotkey_spec("  ", "right_alt").unwrap(), "");
+        assert_eq!(polish_hotkey_spec("Right Alt", "ralt").unwrap(), "ralt", "unchanged keeps the spelling");
+        assert!(polish_hotkey_spec("ctrl+banana", "").is_err());
+    }
+
+    #[test]
+    fn polish_hotkey_field_is_read_and_checked() {
+        let form = Form::new(sample(), false);
+        let mut window = Window::open(&form);
+        assert_eq!(window.get(Field::PolishHotkey), Value::Text(POLISH_OFF.into()));
+        assert_eq!(form.options(Field::PolishHotkey)[0], POLISH_OFF);
+        assert_eq!(form.options(Field::PolishHotkey).len(), POLISH_PRESETS.len() + 1);
+        assert_eq!(form.read(|f| window.get(f)).unwrap().config.polish.hotkey, "");
+
+        window.set(Field::PolishHotkey, Value::Text(hotkey_label(POLISH_PRESETS[0])));
+        assert_eq!(form.read(|f| window.get(f)).unwrap().config.polish.hotkey, POLISH_PRESETS[0]);
+
+        // The same key as the dictation hotkey, or one using the hands-free key, can't be saved.
+        window.set(Field::PolishHotkey, Value::Text("Right Ctrl".into()));
+        assert_eq!(form.read(|f| window.get(f)).unwrap_err().field, Some(Field::PolishHotkey));
+        window.set(Field::PolishHotkey, Value::Text("right_alt+space".into()));
+        assert_eq!(form.read(|f| window.get(f)).unwrap_err().field, Some(Field::PolishHotkey));
+        // ...unless the dictation hotkey moves out of the way.
+        window.set(Field::PolishHotkey, Value::Text("Right Ctrl".into()));
+        window.set(Field::Hotkey, Value::Text("F13".into()));
+        assert_eq!(form.read(|f| window.get(f)).unwrap().config.polish.hotkey, "right_ctrl");
     }
 
     #[test]
@@ -524,11 +664,13 @@ mod tests {
         let fields: Vec<Field> = Section::ALL.iter().flat_map(|s| s.fields()).copied().collect();
         for field in &fields {
             assert_eq!(fields.iter().filter(|f| *f == field).count(), 1, "{field:?}");
-            let (Control::Choice { label, .. } | Control::Check { label } | Control::Lines { label }) =
-                field.control();
+            let (Control::Choice { label, .. }
+            | Control::Check { label }
+            | Control::Text { label, .. }
+            | Control::Lines { label }) = field.control();
             assert!(!plain(label).contains('&'));
         }
-        assert_eq!(fields.len(), 13);
+        assert_eq!(fields.len(), 15);
     }
 
     #[test]
@@ -612,8 +754,10 @@ mod tests {
     #[test]
     fn controls_follow_the_hotkey() {
         let form = Form::new(sample(), false);
-        assert!(form.controls("Right Ctrl").unwrap()[0].contains("Hold Right Ctrl"));
-        assert!(form.controls("ctrl+").is_none(), "still being typed");
+        assert!(form.controls("Right Ctrl", POLISH_OFF).unwrap()[0].contains("Hold Right Ctrl"));
+        assert!(form.controls("Right Ctrl", "F14").unwrap()[1].contains("Hold F14"));
+        assert!(form.controls("ctrl+", POLISH_OFF).is_none(), "still being typed");
+        assert!(form.controls("Right Ctrl", "f14+").is_none(), "still being typed");
     }
 
     #[test]
@@ -640,6 +784,39 @@ mod tests {
         let failed = form.save(&path, &Changes { autostart: false, ..changes }, |_| bail!("denied"));
         assert_eq!(failed.unwrap_err().field, Some(Field::Autostart));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn api_key_shows_half_and_round_trips() {
+        assert_eq!(masked_key("sk-ant-abcdefgh"), "sk-ant-********");
+        assert_eq!(masked_key("abc"), "a**");
+        assert_eq!(masked_key(""), "");
+
+        let current = "sk-ant-api03-secret";
+        assert_eq!(api_key(&masked_key(current), current).unwrap(), current, "untouched");
+        assert_eq!(api_key(" sk-ant-new \n", current).unwrap(), "sk-ant-new", "pasted");
+        assert_eq!(api_key("", current).unwrap(), "", "cleared");
+        assert!(api_key("sk-ant-api0******x", current).is_err(), "edited the stars");
+        assert!(api_key("sk-ant new", "").is_err());
+        let id = api_key("apikey_01Rj2N8SVvo6BePZj99NhmiT", current).unwrap_err().to_string();
+        assert!(id.contains("ID") && id.contains("sk-ant-"), "{id}");
+        // An ID saved before this check is shown masked and kept until it is replaced.
+        assert_eq!(api_key(&masked_key("apikey_01abc"), "apikey_01abc").unwrap(), "apikey_01abc");
+    }
+
+    #[test]
+    fn api_key_field_keeps_replaces_and_saves_the_key() {
+        let original = Config::parse("[polish]\napi_key = \"sk-ant-api03-secret\"\n").unwrap();
+        let form = Form::new(original, false);
+        let mut window = Window::open(&form);
+        assert_eq!(window.get(Field::ApiKey), Value::Text("sk-ant-ap**********".into()));
+        assert_eq!(form.read(|f| window.get(f)).unwrap().config.polish.api_key, "sk-ant-api03-secret");
+
+        window.set(Field::ApiKey, Value::Text("sk-ant-api03-other".into()));
+        assert_eq!(form.read(|f| window.get(f)).unwrap().config.polish.api_key, "sk-ant-api03-other");
+
+        window.set(Field::ApiKey, Value::Text("sk-ant-api***".into()));
+        assert_eq!(form.read(|f| window.get(f)).unwrap_err().field, Some(Field::ApiKey));
     }
 
     #[test]

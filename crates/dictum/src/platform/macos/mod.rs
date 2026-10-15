@@ -365,7 +365,7 @@ fn edit_menu() -> tray_icon::menu::Result<Menu> {
 pub fn run(ui: &Ui, bindings: Bindings, commands: Sender<Command>, paths: &Paths) -> Result<bool> {
     let mtm = MainThreadMarker::new().context("the event loop must run on the main thread")?;
     tap::start(
-        Machine::new(bindings.hotkey, bindings.hands_free, bindings.cancel),
+        Machine::new(bindings.hotkey, bindings.hands_free, bindings.cancel).with_polish(bindings.polish),
         commands.clone(),
         ui.clone(),
     );

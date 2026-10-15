@@ -9,6 +9,9 @@
 //! speculative transcription of "everything so far". When the hotkey is released the final
 //! segment usually matches the last speculation, so its text is already there. Superseded
 //! speculations are skipped, or interrupted mid-inference if they are already running.
+//!
+//! Dictations started with the polish hotkey also send each pause's full text to the
+//! [`Polisher`]; if nothing more is said, that rewrite is the one the output waits for.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -20,6 +23,9 @@ use dictum_engine::text::{self, TextOptions};
 use dictum_engine::{
     FinalSegment, Interrupt, Parakeet, Resampler, SegmentEvent, SegmentKey, Segmenter, SegmenterConfig, Vad,
 };
+
+use crate::hotkey::Style;
+use crate::polish::{Pending, Polisher};
 
 pub type SessionId = u64;
 
@@ -52,17 +58,36 @@ impl Transcriber for Parakeet {
 
 #[derive(Debug)]
 pub enum Job {
-    Speculate { session: SessionId, generation: u64, segment: FinalSegment },
-    Segment { session: SessionId, segment: FinalSegment },
-    Finish { session: SessionId, segment: Option<FinalSegment> },
-    Abort { session: SessionId },
+    /// Sets what happens to the session's text (sent at the start, and on a switch).
+    Style {
+        session: SessionId,
+        style: Style,
+    },
+    Speculate {
+        session: SessionId,
+        generation: u64,
+        segment: FinalSegment,
+    },
+    Segment {
+        session: SessionId,
+        segment: FinalSegment,
+    },
+    Finish {
+        session: SessionId,
+        segment: Option<FinalSegment>,
+    },
+    Abort {
+        session: SessionId,
+    },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct Done {
     pub session: SessionId,
     /// Final text to insert; `None` if nothing was said.
     pub text: Option<String>,
+    /// The rewrite of `text` to insert instead, once it arrives (polish hotkey only).
+    pub polish: Option<Pending>,
     /// Time from the end of the recording to the text being ready.
     pub latency: Duration,
 }
@@ -154,7 +179,7 @@ impl Dictation {
         })
     }
 
-    pub fn start(&mut self, input_rate: u32) {
+    pub fn start(&mut self, input_rate: u32, style: Style) {
         if self.current.is_some() {
             self.cancel();
         }
@@ -163,6 +188,9 @@ impl Dictation {
         }
         let session = self.next_session;
         self.next_session += 1;
+        if style != Style::Plain {
+            send(&self.jobs, Job::Style { session, style });
+        }
         self.current = Some(Recording {
             session,
             resampler: Resampler::new(input_rate),
@@ -171,6 +199,13 @@ impl Dictation {
             resampled: Vec::new(),
             samples: 0,
         });
+    }
+
+    /// Changes what happens to the current recording's text.
+    pub fn set_style(&mut self, style: Style) {
+        if let Some(rec) = &self.current {
+            send(&self.jobs, Job::Style { session: rec.session, style });
+        }
     }
 
     /// Feeds mono samples at the rate given to [`Self::start`].
@@ -229,10 +264,18 @@ fn send(jobs: &Sender<Job>, job: Job) {
     }
 }
 
-#[derive(Default)]
 struct SessionState {
+    style: Style,
     parts: Vec<String>,
     speculation: Option<(SegmentKey, String)>,
+    /// Rewrite of the latest speculative text, started before the release.
+    polish: Option<Pending>,
+}
+
+impl Default for SessionState {
+    fn default() -> Self {
+        Self { style: Style::Plain, parts: Vec::new(), speculation: None, polish: None }
+    }
 }
 
 pub struct Worker<T: Transcriber> {
@@ -240,12 +283,19 @@ pub struct Worker<T: Transcriber> {
     spec: Arc<SpecControl>,
     text: TextOptions,
     trailing_space: bool,
+    polisher: Option<Arc<Polisher>>,
     sessions: HashMap<SessionId, SessionState>,
 }
 
 impl<T: Transcriber> Worker<T> {
     pub fn new(transcriber: T, spec: Arc<SpecControl>, text: TextOptions, trailing_space: bool) -> Self {
-        Self { transcriber, spec, text, trailing_space, sessions: HashMap::new() }
+        Self { transcriber, spec, text, trailing_space, polisher: None, sessions: HashMap::new() }
+    }
+
+    /// Enables the polish hotkey's rewrites; without a polisher its dictations stay plain.
+    pub fn with_polisher(mut self, polisher: Option<Arc<Polisher>>) -> Self {
+        self.polisher = polisher;
+        self
     }
 
     /// Processes jobs until the channel closes.
@@ -259,6 +309,10 @@ impl<T: Transcriber> Worker<T> {
 
     fn handle(&mut self, job: Job) -> Option<Done> {
         match job {
+            Job::Style { session, style } => {
+                self.sessions.entry(session).or_default().style = style;
+                None
+            }
             Job::Speculate { session, generation, segment } => {
                 if !self.spec.begin(generation) {
                     return None; // superseded while queued
@@ -267,7 +321,9 @@ impl<T: Transcriber> Worker<T> {
                 self.spec.end();
                 match result {
                     Ok(Some(text)) => {
-                        self.sessions.entry(session).or_default().speculation = Some((segment.key, text));
+                        let state = self.sessions.entry(session).or_default();
+                        state.speculation = Some((segment.key, text.clone()));
+                        self.polish_ahead(session, text);
                     }
                     Ok(None) => log::debug!("speculation superseded mid-run"),
                     Err(e) => log::warn!("speculative transcription failed: {e:#}"),
@@ -290,18 +346,44 @@ impl<T: Transcriber> Worker<T> {
                 let joined = text::join_segments(state.parts);
                 let mut processed = text::process(&joined, &self.text);
                 if processed.is_empty() {
-                    return Some(Done { session, text: None, latency: started.elapsed() });
+                    return Some(Done { session, text: None, polish: None, latency: started.elapsed() });
                 }
+                let polish = match &self.polisher {
+                    Some(polisher) if state.style == Style::Polish => {
+                        let pending = match state.polish {
+                            Some(pending) if pending.input() == processed => pending,
+                            _ => polisher.start(processed.clone()),
+                        };
+                        Some(pending.until(started + polisher.timeout()))
+                    }
+                    _ => None,
+                };
                 if self.trailing_space && !processed.ends_with(char::is_whitespace) {
                     processed.push(' ');
                 }
-                Some(Done { session, text: Some(processed), latency: started.elapsed() })
+                Some(Done { session, text: Some(processed), polish, latency: started.elapsed() })
             }
             Job::Abort { session } => {
                 self.sessions.remove(&session);
                 None
             }
         }
+    }
+
+    /// Starts rewriting the text the dictation would have if it ended at this pause, where
+    /// `last` is the speculative transcript of the final segment.
+    fn polish_ahead(&mut self, session: SessionId, last: String) {
+        let Some(polisher) = &self.polisher else { return };
+        let Some(state) = self.sessions.get_mut(&session) else { return };
+        if state.style != Style::Polish {
+            return;
+        }
+        let joined = text::join_segments(state.parts.iter().cloned().chain([last]));
+        let processed = text::process(&joined, &self.text);
+        if processed.is_empty() || state.polish.as_ref().is_some_and(|p| p.input() == processed) {
+            return;
+        }
+        state.polish = Some(polisher.start(processed));
     }
 
     /// Text of a segment, reusing the session's speculation when it covered exactly this audio.
@@ -377,12 +459,16 @@ mod tests {
     }
 
     fn rig(block_first_speculation: bool) -> Rig {
+        rig_with(block_first_speculation, None)
+    }
+
+    fn rig_with(block_first_speculation: bool, polisher: Option<Arc<Polisher>>) -> Rig {
         let (jobs_tx, jobs_rx) = crossbeam_channel::unbounded();
         let (done_tx, done_rx) = crossbeam_channel::unbounded();
         let spec = SpecControl::new().unwrap();
         let calls = Arc::new(Calls::default());
         let fake = Fake { calls: calls.clone(), block_first_speculation };
-        let worker = Worker::new(fake, spec.clone(), TextOptions::default(), true);
+        let worker = Worker::new(fake, spec.clone(), TextOptions::default(), true).with_polisher(polisher);
         let worker = std::thread::spawn(move || worker.run(jobs_rx, done_tx));
         let dictation = Dictation::new(jobs_tx, spec, Some(Vad::new().unwrap()));
         Rig { dictation, done: done_rx, calls, worker }
@@ -404,7 +490,7 @@ mod tests {
     #[test]
     fn pause_then_release_reuses_speculation() {
         let mut rig = rig(false);
-        rig.dictation.start(16_000);
+        rig.dictation.start(16_000, Style::Plain);
         let mut audio = jfk()[..16_000 * 7].to_vec(); // stay under the split threshold
         audio.extend(vec![0.0; 16_000]);
         feed(&mut rig.dictation, &audio);
@@ -418,10 +504,67 @@ mod tests {
         assert_eq!(direct, 0, "the final segment must reuse the speculative transcript");
     }
 
+    /// Upper-cases the text and counts how often it was asked to.
+    #[derive(Default)]
+    struct Shout(AtomicUsize);
+
+    impl crate::polish::Rewrite for Shout {
+        fn rewrite(&self, text: &str) -> Result<String> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(text.to_uppercase())
+        }
+    }
+
+    #[test]
+    fn polish_starts_at_the_pause_and_is_reused_at_release() {
+        let shout = Arc::new(Shout::default());
+        let mut rig = rig_with(false, Some(Polisher::new(shout.clone(), Duration::from_secs(5))));
+        rig.dictation.start(16_000, Style::Polish);
+        let mut audio = jfk()[..16_000 * 7].to_vec();
+        audio.extend(vec![0.0; 16_000]);
+        feed(&mut rig.dictation, &audio);
+        rig.dictation.stop().unwrap();
+        let done = rig.done.recv_timeout(Duration::from_secs(5)).unwrap();
+        let text = done.text.unwrap();
+        assert_eq!(done.polish.unwrap().wait().unwrap(), text.trim().to_uppercase());
+        let (speculative, direct) = finish(rig);
+        assert_eq!(direct, 0);
+        // One rewrite per pause, none at the release: the last pause's rewrite is the result.
+        assert_eq!(shout.0.load(Ordering::SeqCst), speculative);
+    }
+
+    #[test]
+    fn plain_dictations_are_not_polished() {
+        let shout = Arc::new(Shout::default());
+        let mut rig = rig_with(false, Some(Polisher::new(shout.clone(), Duration::from_secs(5))));
+        rig.dictation.start(16_000, Style::Plain);
+        let mut audio = jfk()[..16_000 * 7].to_vec();
+        audio.extend(vec![0.0; 16_000]);
+        feed(&mut rig.dictation, &audio);
+        rig.dictation.stop().unwrap();
+        let done = rig.done.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(done.text.is_some() && done.polish.is_none());
+        finish(rig);
+        assert_eq!(shout.0.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn switching_to_polish_mid_recording_polishes() {
+        let shout = Arc::new(Shout::default());
+        let mut rig = rig_with(false, Some(Polisher::new(shout.clone(), Duration::from_secs(5))));
+        rig.dictation.start(16_000, Style::Plain);
+        rig.dictation.set_style(Style::Polish);
+        feed(&mut rig.dictation, &jfk()[..16_000 * 4]);
+        rig.dictation.stop().unwrap();
+        let done = rig.done.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(done.polish.is_some());
+        finish(rig);
+    }
+
     #[test]
     fn speech_until_release_transcribes_tail() {
         let mut rig = rig(false);
-        rig.dictation.start(16_000);
+        rig.dictation.start(16_000, Style::Plain);
         feed(&mut rig.dictation, &jfk()[..16_000 * 4]); // released mid-sentence
         assert!(matches!(rig.dictation.stop().unwrap(), Stopped::Pending(_)));
         let done = rig.done.recv_timeout(Duration::from_secs(5)).unwrap();
@@ -432,7 +575,7 @@ mod tests {
     #[test]
     fn silence_produces_nothing() {
         let mut rig = rig(false);
-        rig.dictation.start(48_000);
+        rig.dictation.start(48_000, Style::Plain);
         feed(&mut rig.dictation, &vec![0.0; 48_000 * 2]);
         assert_eq!(rig.dictation.stop().unwrap(), Stopped::NoSpeech);
         let done = rig.done.recv_timeout(Duration::from_secs(5)).unwrap();
@@ -443,7 +586,7 @@ mod tests {
     #[test]
     fn resumed_speech_interrupts_running_speculation() {
         let mut rig = rig(true);
-        rig.dictation.start(16_000);
+        rig.dictation.start(16_000, Style::Plain);
         let speech = jfk();
         let mut audio = speech[..16_000 * 3].to_vec();
         audio.extend(vec![0.0; 16_000]); // pause → speculation starts and blocks
@@ -461,7 +604,7 @@ mod tests {
     #[test]
     fn cancel_discards_everything() {
         let mut rig = rig(false);
-        rig.dictation.start(16_000);
+        rig.dictation.start(16_000, Style::Plain);
         feed(&mut rig.dictation, &jfk());
         rig.dictation.cancel();
         assert!(!rig.dictation.is_recording());
@@ -472,7 +615,7 @@ mod tests {
     #[test]
     fn device_rate_is_resampled() {
         let mut rig = rig(false);
-        rig.dictation.start(48_000);
+        rig.dictation.start(48_000, Style::Plain);
         feed(&mut rig.dictation, &vec![0.0; 48_000]);
         let recorded = rig.dictation.recorded();
         assert!((recorded.as_secs_f64() - 1.0).abs() < 0.01, "{recorded:?}");

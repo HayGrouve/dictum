@@ -173,7 +173,8 @@ pub fn http_get(url: &str, accept: &str, limit: u64) -> Result<Vec<u8>> {
     Ok(response.body_mut().with_config().limit(limit).read_to_vec()?)
 }
 
-fn agent() -> ureq::Agent {
+/// An HTTP agent using the OS TLS stack and certificate store on Windows and macOS.
+pub fn agent() -> ureq::Agent {
     #[cfg(any(windows, target_os = "macos"))]
     let tls = ureq::tls::TlsConfig::builder()
         .provider(ureq::tls::TlsProvider::NativeTls)

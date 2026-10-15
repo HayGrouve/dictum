@@ -281,7 +281,8 @@ pub fn relaunch() {
 
 /// Runs the main-thread event loop until the user quits. Returns `true` to restart.
 pub fn run(ui: &Ui, bindings: Bindings, commands: Sender<Command>, paths: &Paths) -> Result<bool> {
-    let machine = Machine::new(bindings.hotkey, bindings.hands_free, bindings.cancel);
+    let machine =
+        Machine::new(bindings.hotkey, bindings.hands_free, bindings.cancel).with_polish(bindings.polish);
     let _hook = hook::install(machine, commands.clone())?;
 
     let status_item = MenuItem::new("Starting…", false, None);
