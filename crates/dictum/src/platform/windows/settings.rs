@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex, Once};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Controls::{
-    BST_CHECKED, BST_UNCHECKED, CheckDlgButton, ICC_STANDARD_CLASSES, INITCOMMONCONTROLSEX,
+    BST_CHECKED, BST_UNCHECKED, CheckDlgButton, EM_SETCUEBANNER, ICC_STANDARD_CLASSES, INITCOMMONCONTROLSEX,
     InitCommonControlsEx, IsDlgButtonChecked,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
@@ -17,12 +17,13 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     BN_CLICKED, BS_AUTOCHECKBOX, BS_DEFPUSHBUTTON, BS_GROUPBOX, BS_PUSHBUTTON, CB_ADDSTRING, CB_GETCURSEL,
     CB_RESETCONTENT, CB_SETCURSEL, CBN_EDITCHANGE, CBN_SELCHANGE, CBS_AUTOHSCROLL, CBS_DROPDOWN,
     CBS_DROPDOWNLIST, CreateDialogIndirectParamW, DS_CENTER, DS_MODALFRAME, DS_SETFONT, DestroyWindow,
-    ES_AUTOVSCROLL, ES_MULTILINE, ES_WANTRETURN, GetDlgItem, GetDlgItemTextW, GetSystemMetrics,
-    GetWindowTextLengthW, ICON_BIG, ICON_SMALL, IDCANCEL, IDOK, IMAGE_ICON, IsDialogMessageW, LR_SHARED,
-    LoadImageW, MSG, PostMessageW, SM_CXICON, SM_CXSMICON, SM_CYICON, SM_CYSMICON, SW_RESTORE, SW_SHOW,
-    SendDlgItemMessageW, SendMessageW, SetDlgItemTextW, SetForegroundWindow, ShowWindow, WM_APP, WM_COMMAND,
-    WM_INITDIALOG, WM_NCDESTROY, WM_NEXTDLGCTL, WM_SETICON, WS_CAPTION, WS_CHILD, WS_EX_APPWINDOW,
-    WS_EX_CLIENTEDGE, WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
+    ES_AUTOHSCROLL, ES_AUTOVSCROLL, ES_MULTILINE, ES_WANTRETURN, GetDlgItem, GetDlgItemTextW,
+    GetSystemMetrics, GetWindowTextLengthW, ICON_BIG, ICON_SMALL, IDCANCEL, IDOK, IMAGE_ICON,
+    IsDialogMessageW, LR_SHARED, LoadImageW, MSG, PostMessageW, SM_CXICON, SM_CXSMICON, SM_CYICON,
+    SM_CYSMICON, SW_RESTORE, SW_SHOW, SendDlgItemMessageW, SendMessageW, SetDlgItemTextW,
+    SetForegroundWindow, ShowWindow, WM_APP, WM_COMMAND, WM_INITDIALOG, WM_NCDESTROY, WM_NEXTDLGCTL,
+    WM_SETICON, WS_CAPTION, WS_CHILD, WS_EX_APPWINDOW, WS_EX_CLIENTEDGE, WS_POPUP, WS_SYSMENU, WS_TABSTOP,
+    WS_VISIBLE, WS_VSCROLL,
 };
 
 use super::{autostart, wide};
@@ -44,7 +45,9 @@ pub(super) const ID_OPEN_FILE: i32 = 111;
 pub(super) const ID_INDICATOR: i32 = 112;
 pub(super) const ID_STUTTERS: i32 = 113;
 /// The "Controls" lines, one per `settings::controls_help` line.
-pub(super) const ID_CONTROLS: [i32; 3] = [114, 115, 116];
+pub(super) const ID_CONTROLS: [i32; settings::CONTROLS_LINES] = [114, 115, 116, 119];
+pub(super) const ID_API_KEY: i32 = 117;
+pub(super) const ID_POLISH_HOTKEY: i32 = 118;
 
 /// Posted by the thread that lists the microphones.
 const WM_MICROPHONES: u32 = WM_APP + 10;
@@ -63,6 +66,8 @@ fn id(field: Field) -> i32 {
         Field::RemoveStutters => ID_STUTTERS,
         Field::VoiceCommands => ID_COMMANDS,
         Field::TrailingSpace => ID_SPACE,
+        Field::PolishHotkey => ID_POLISH_HOTKEY,
+        Field::ApiKey => ID_API_KEY,
         Field::Vocabulary => ID_VOCABULARY,
         Field::Replacements => ID_REPLACEMENTS,
     }
@@ -186,11 +191,15 @@ unsafe extern "system" fn dialog_proc(hwnd: HWND, msg: u32, wparam: WPARAM, _lpa
                         super::open(&path);
                     }
                 }
-                // The edit text isn't updated yet when the selection changes: use the preset.
-                (ID_HOTKEY, CBN_SELCHANGE) => {
-                    let preset = selection(hwnd, ID_HOTKEY).and_then(|i| settings::HOTKEY_PRESETS.get(i));
-                    if let Some(preset) = preset {
-                        refresh(hwnd, Some(&settings::hotkey_label(preset)));
+                // The edit text isn't updated yet when the selection changes: use the entry.
+                (ID_HOTKEY | ID_POLISH_HOTKEY, CBN_SELCHANGE) => {
+                    let field = if control == ID_HOTKEY { Field::Hotkey } else { Field::PolishHotkey };
+                    let index = selection(hwnd, control);
+                    let entry = DIALOG.with(|d| {
+                        d.borrow().as_ref().and_then(|d| d.form.options(field).get(index?).cloned())
+                    });
+                    if let Some(entry) = entry {
+                        refresh(hwnd, Some((field, entry)));
                     }
                 }
                 (_, CBN_SELCHANGE | CBN_EDITCHANGE | BN_CLICKED) if fields().any(|f| id(f) == control) => {
@@ -219,8 +228,18 @@ fn init(hwnd: HWND) {
     };
     set_icons(hwnd);
     for (field, options, value) in initial {
-        if let Control::Choice { .. } = field.control() {
-            fill_combo(hwnd, id(field), &options, None);
+        match field.control() {
+            Control::Choice { .. } => fill_combo(hwnd, id(field), &options, None),
+            Control::Text { placeholder, .. } => unsafe {
+                SendDlgItemMessageW(
+                    hwnd,
+                    id(field),
+                    EM_SETCUEBANNER,
+                    0,
+                    wide(placeholder).as_ptr() as LPARAM,
+                );
+            },
+            Control::Check { .. } | Control::Lines { .. } => {}
         }
         show(hwnd, field, &value);
     }
@@ -237,7 +256,9 @@ fn init(hwnd: HWND) {
 /// What a field's control holds.
 fn value(hwnd: HWND, field: Field) -> Value {
     match field.control() {
-        Control::Choice { editable: true, .. } | Control::Lines { .. } => Value::Text(text(hwnd, id(field))),
+        Control::Choice { editable: true, .. } | Control::Text { .. } | Control::Lines { .. } => {
+            Value::Text(text(hwnd, id(field)))
+        }
         Control::Choice { editable: false, .. } => Value::Choice(selection(hwnd, id(field))),
         Control::Check { .. } => Value::Check(checked(hwnd, id(field))),
     }
@@ -268,15 +289,19 @@ fn show_microphones(hwnd: HWND) {
 }
 
 /// Updates what depends on other fields: which can be changed, and the "Controls" lines (left as
-/// they are while the hotkey is still being typed). `hotkey` stands in for the hotkey field's
-/// text, which isn't updated yet while its selection changes.
-fn refresh(hwnd: HWND, hotkey: Option<&str>) {
+/// they are while a hotkey is still being typed). `selected` is a hotkey field whose selection
+/// just changed, with the entry's text: the field itself isn't updated yet.
+fn refresh(hwnd: HWND, selected: Option<(Field, String)>) {
     for field in fields() {
         let enabled = Form::enabled(field, |f| value(hwnd, f));
         unsafe { EnableWindow(GetDlgItem(hwnd, id(field)), enabled.into()) };
     }
-    let hotkey = hotkey.map_or_else(|| text(hwnd, ID_HOTKEY), String::from);
-    let lines = DIALOG.with(|d| d.borrow().as_ref().and_then(|d| d.form.controls(&hotkey)));
+    let text_of = |field: Field| match &selected {
+        Some((f, entry)) if *f == field => entry.clone(),
+        _ => text(hwnd, id(field)),
+    };
+    let (hotkey, polish) = (text_of(Field::Hotkey), text_of(Field::PolishHotkey));
+    let lines = DIALOG.with(|d| d.borrow().as_ref().and_then(|d| d.form.controls(&hotkey, &polish)));
     for (id, line) in ID_CONTROLS.into_iter().zip(lines.into_iter().flatten()) {
         set_text(hwnd, id, &line);
     }
@@ -379,12 +404,13 @@ pub(super) fn selection(hwnd: HWND, id: i32) -> Option<usize> {
 
 /// The layout, in dialog units (they scale with the font and the display's DPI).
 fn template() -> Vec<u32> {
-    let mut t = Template::new(settings::TITLE, 440, 306);
+    let mut t = Template::new(settings::TITLE, 440, 351);
 
     for section in Section::ALL {
         let group = match section {
             Section::Dictation => (7, 7, 206, 94),
             Section::Text => (7, 108, 206, 103),
+            Section::Polish => (7, 218, 426, 27),
             Section::Vocabulary => (220, 7, 213, 204),
         };
         t.group(section.title(), group);
@@ -397,6 +423,10 @@ fn template() -> Vec<u32> {
                     t.combo(id(field), style, control);
                 }
                 Control::Check { label: text } => t.check(id(field), text, control),
+                Control::Text { label: text, .. } => {
+                    t.label(text, label);
+                    t.line_edit(id(field), control);
+                }
                 Control::Lines { label: text } => {
                     t.label(text, label);
                     t.edit(id(field), control);
@@ -405,16 +435,16 @@ fn template() -> Vec<u32> {
         }
     }
 
-    t.group(settings::CONTROLS_TITLE, (7, 218, 426, 58));
-    for (id, y) in ID_CONTROLS.into_iter().zip([231, 242, 253]) {
+    t.group(settings::CONTROLS_TITLE, (7, 252, 426, 69));
+    for (id, y) in ID_CONTROLS.into_iter().zip([265, 276, 287, 298]) {
         t.text(id, "", (14, y, 412, 8));
     }
-    t.label(settings::CONTROLS_NOTE, (14, 264, 412, 8));
+    t.label(settings::CONTROLS_NOTE, (14, 309, 412, 8));
 
-    t.button(ID_OPEN_FILE, settings::OPEN_FILE, (7, 285, 70, 14), false);
-    t.label(settings::SAVE_NOTE, (84, 288, 200, 8));
-    t.button(IDOK, settings::SAVE, (329, 285, 50, 14), true);
-    t.button(IDCANCEL, settings::CANCEL, (383, 285, 50, 14), false);
+    t.button(ID_OPEN_FILE, settings::OPEN_FILE, (7, 330, 70, 14), false);
+    t.label(settings::SAVE_NOTE, (84, 333, 200, 8));
+    t.button(IDOK, settings::SAVE, (329, 330, 50, 14), true);
+    t.button(IDCANCEL, settings::CANCEL, (383, 330, 50, 14), false);
     t.finish()
 }
 
@@ -435,6 +465,8 @@ fn place(field: Field) -> (Rect, Rect) {
         Field::RemoveStutters => check(167),
         Field::VoiceCommands => check(181),
         Field::TrailingSpace => check(195),
+        Field::PolishHotkey => ((14, 232, 56, 8), (74, 230, 132, 100)),
+        Field::ApiKey => ((227, 232, 36, 8), (266, 230, 160, 12)),
         Field::Vocabulary => ((227, 19, 199, 16), (227, 37, 199, 79)),
         Field::Replacements => ((227, 123, 199, 8), (227, 134, 199, 70)),
     }
@@ -492,6 +524,11 @@ impl Template {
 
     fn edit(&mut self, id: i32, rect: Rect) {
         let style = (ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN) as u32 | WS_VSCROLL | WS_TABSTOP;
+        self.item(Self::EDIT, "", id, style, WS_EX_CLIENTEDGE, rect);
+    }
+
+    fn line_edit(&mut self, id: i32, rect: Rect) {
+        let style = ES_AUTOHSCROLL as u32 | WS_TABSTOP;
         self.item(Self::EDIT, "", id, style, WS_EX_CLIENTEDGE, rect);
     }
 

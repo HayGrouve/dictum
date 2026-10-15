@@ -20,7 +20,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 use super::settings::{self as window, *};
 use super::*;
 use crate::config::Config;
-use crate::hotkey::{Action, Hotkey, Key};
+use crate::hotkey::{Action, Hotkey, Key, Style};
 use crate::indicator::Phase;
 
 /// The clipboard, focus and keyboard are global: run these one at a time.
@@ -242,7 +242,7 @@ fn keyboard_hook_drives_hotkey_actions() {
         eprintln!("SKIPPED: hook received no events (no interactive desktop)");
         return;
     };
-    assert_eq!(first, Action::Start);
+    assert_eq!(first, Action::Start(Style::Plain));
     assert!(hotkey_held(&Hotkey::parse("right_ctrl").unwrap()), "held key is visible to the watchdog");
     std::thread::sleep(Duration::from_millis(400));
     press(&[key_event(VK_SPACE, false), key_event(VK_SPACE, true)]);
@@ -313,13 +313,18 @@ fn settings_window_saves_changes_into_the_file() {
     assert_eq!(text(dialog, ID_REPLACEMENTS), "get hub = GitHub");
     assert!(checked(dialog, ID_STUTTERS));
     assert_eq!(text(dialog, ID_CONTROLS[0]), "Hold Right Ctrl and speak; release to insert the text.");
-    assert!(text(dialog, ID_CONTROLS[1]).contains("tap Space"));
-    assert!(text(dialog, ID_CONTROLS[2]).contains("Esc"));
+    assert_eq!(text(dialog, ID_POLISH_HOTKEY), "Off");
+    assert!(text(dialog, ID_CONTROLS[1]).contains("Pick a hotkey"));
+    assert!(text(dialog, ID_CONTROLS[2]).contains("tap Space"));
+    assert!(text(dialog, ID_CONTROLS[3]).contains("Esc"));
 
-    step("the controls follow the hotkey being picked");
+    step("the controls follow the hotkeys being picked");
     unsafe { SendDlgItemMessageW(dialog, ID_HOTKEY, CB_SETCURSEL, 0, 0) };
     click(dialog, ID_HOTKEY | (CBN_SELCHANGE as i32) << 16);
-    assert!(text(dialog, ID_CONTROLS[1]).contains("press Ctrl+Win again"));
+    assert!(text(dialog, ID_CONTROLS[0]).contains("Hold Ctrl+Win"));
+    unsafe { SendDlgItemMessageW(dialog, ID_POLISH_HOTKEY, CB_SETCURSEL, 1, 0) };
+    click(dialog, ID_POLISH_HOTKEY | (CBN_SELCHANGE as i32) << 16);
+    assert!(text(dialog, ID_CONTROLS[1]).contains("Hold Right Alt instead"));
 
     step("choosing typing disables the clipboard option");
     let restore = unsafe { GetDlgItem(dialog, ID_RESTORE) };
@@ -346,6 +351,7 @@ fn settings_window_saves_changes_into_the_file() {
     assert_eq!(saved.vocabulary, ["Vercel", "Claude Code"]);
     assert_eq!(saved.replacements.get("get hub").map(String::as_str), Some("GitHub"));
     assert_eq!(saved.threads, 2);
+    assert_eq!(saved.polish.hotkey, "right_alt");
 }
 
 #[test]

@@ -151,9 +151,14 @@ pub fn modifier_pressed(code: CGKeyCode, flags: CGEventFlags) -> Option<bool> {
 /// Physical state right now.
 pub fn is_down(key: Key) -> bool {
     let state = CGEventSourceStateID::HIDSystemState;
-    let by_code = to_keycode(key).is_some_and(|code| CGEventSource::key_state(state, code));
-    // Fn has no reliable key state on every keyboard; its flag is.
-    by_code || (key == Key::Fn && CGEventSource::flags_state(state).contains(CGEventFlags::MaskSecondaryFn))
+    let Some(code) = to_keycode(key) else { return false };
+    if CGEventSource::key_state(state, code) {
+        return true;
+    }
+    // Modifiers don't always have a reliable key state (Fn, and the right-hand Option and Cmd
+    // read as up while held); their flags do, with a bit for each side.
+    // (Caps Lock's flag is its lock state, not the key.)
+    MODIFIERS.contains(&key) && modifier_pressed(code, CGEventSource::flags_state(state)) == Some(true)
 }
 
 fn match_down(m: KeyMatch) -> bool {

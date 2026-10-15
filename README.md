@@ -4,6 +4,8 @@ Hold a hotkey, speak, release — the text appears wherever your cursor is.
 
 Dictum is a fast, private take on [Wispr Flow](https://wisprflow.ai/) with nothing extra: no
 window, no account, no cloud, no transcript history. It runs on Windows and on Apple Silicon Macs.
+An optional second hotkey has Claude polish what you said into a clean prompt; only that one
+sends anything off the machine.
 Speech recognition runs entirely on your machine with NVIDIA's **Parakeet TDT 0.6B v3** (25
 languages, including English and Bulgarian, with punctuation and capitalisation).
 
@@ -16,6 +18,39 @@ languages, including English and Bulgarian, with punctuation and capitalisation)
 | **Esc** while recording | Discard the recording |
 
 The hotkey is **Ctrl+Win** on Windows and **Fn** (🌐) on macOS; *Settings…* changes it.
+An optional second hotkey dictates polished prompts (see below).
+
+## Polished prompts (optional)
+
+A second hotkey sends what you said to Claude, which rewrites it into the prompt you meant to
+type: self-corrections applied ("make it blue, actually scratch that, green" → "Make it green."),
+sentences repaired, misheard technical terms fixed, and longer requests structured as a goal plus
+bullet points with code names in backticks. It is tuned for prompts to AI coding assistants. The
+normal hotkey stays exactly as it is, so you can switch between the two.
+
+It is off until you set it up in *Settings…* → *Polished prompts*: pick a hotkey ("Off" turns
+it off again) and paste your API key from console.anthropic.com. The key field then shows the
+first half of the key and stars for the rest; clear it to remove the key. The same settings, and
+a few more, are in `config.toml`:
+
+```toml
+[polish]
+hotkey = "right_option"        # or "fn+shift", "right_cmd", "right_ctrl", …
+api_key = "sk-ant-…"           # from console.anthropic.com; or set ANTHROPIC_API_KEY
+model = "claude-haiku-5-5"
+timeout_ms = 4000              # after this, the plain text is inserted instead
+instructions = "We use Next.js App Router, Tailwind and Convex."   # optional
+```
+
+Rewrites start while you are still talking: at every pause the text so far is sent, so when you
+release the key the result is often on its way already. The indicator stays amber until it
+arrives. If it fails or takes longer than `timeout_ms`, the plain text is inserted with an error
+sound. Your `vocabulary` is passed along so its spellings survive. A longer hotkey that contains
+the normal one (`fn+shift` with `fn`) works if you press the extra key within 300 ms.
+
+If polishing fails, the log (*Open log*) says why. Common causes: the key's ID (`apikey_…`)
+pasted instead of the key, a key that isn't scoped to a workspace (create it inside one), or no
+API credits on the account (API usage is billed separately from a Claude subscription).
 
 While you dictate, a small bar at the bottom of the screen shows that Dictum is listening, with
 live levels from your microphone. In hands-free mode its red dot becomes a stop square, and it
@@ -35,8 +70,8 @@ macOS; the icon shows progress.
 
 *Settings…* opens a window with the settings you're likely to change: hotkey, microphone, the
 on-screen indicator, sounds, starting with the computer, how text is inserted, filler-word and
-stutter removal, voice commands, trailing space, vocabulary and replacements, plus a reminder of
-the controls above. *Save* writes them to the config file and restarts Dictum to apply them.
+stutter removal, voice commands, trailing space, the hotkey and API key for polished prompts,
+vocabulary and replacements, plus a reminder of the controls above. *Save* writes them to the config file and restarts Dictum to apply them.
 
 Everything is stored in `config.toml` (`%APPDATA%\Dictum` on Windows,
 `~/Library/Application Support/Dictum` on macOS), created on first run with every option
@@ -90,6 +125,9 @@ release without saying more, and cancelled mid-inference if you keep talking. Se
 ## Privacy
 
 Audio never leaves the machine and is never written to disk. Dictated text is never logged.
+The one exception is the optional polish hotkey: its dictations' text (never audio) is sent to
+Anthropic's API, along with your `vocabulary` and `instructions`. Without `[polish]` set up,
+nothing is sent anywhere.
 When pasting, your previous clipboard contents (all formats) are put back and the dictated text
 stays out of clipboard history: Windows is told to exclude it from clipboard history and cloud
 clipboard, and on macOS it is marked transient so clipboard managers skip it.
@@ -159,6 +197,8 @@ cargo test --workspace                   # unit tests (any OS)
 DICTUM_MODEL_DIR=~/.cache/dictum cargo test --release -p dictum-engine -- --nocapture
                                          # accuracy/latency on real speech (downloads the model)
 cargo run --release -p dictum-engine --example transcribe -- <model-dir> file.wav
+ANTHROPIC_API_KEY=sk-ant-… cargo test -p dictum live_rewrites -- --ignored --nocapture
+                                         # sample dictations through the polish rewrite
 ```
 
 On macOS, `scripts/macos-bundle.sh` signs with "Dictum Signing" when it is in your keychain, so

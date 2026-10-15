@@ -1,5 +1,6 @@
 //! Platform-independent hotkey logic: parsing hotkey specs and turning raw key events into
-//! dictation actions (hold-to-talk, hands-free lock, cancel).
+//! dictation actions (hold-to-talk, hands-free lock, cancel). A second, optional hotkey starts
+//! dictations whose text is polished by an LLM before it is inserted.
 
 use std::collections::HashSet;
 use std::fmt;
@@ -176,10 +177,20 @@ pub fn key_name(key: Key) -> String {
     }
 }
 
+/// Which hotkey started a dictation, and so what happens to its text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Style {
+    /// Inserted as recognised (after the local clean-up).
+    Plain,
+    /// Rewritten by the LLM into a clean prompt before it is inserted.
+    Polish,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
-    /// Hotkey pressed: start recording (hold-to-talk).
-    Start,
+    /// A hotkey pressed: start recording (hold-to-talk). Sent again with the new style when a
+    /// longer hotkey is completed right after a shorter one it contains (`fn`, then `fn+shift`).
+    Start(Style),
     /// Hotkey released (or pressed again in hands-free mode): transcribe and insert.
     Stop,
     /// Hands-free key pressed while holding the hotkey: keep recording after release.
@@ -215,7 +226,10 @@ enum State {
 const SHORTCUT_WINDOW: Duration = Duration::from_millis(300);
 
 pub struct Machine {
-    hotkey: Hotkey,
+    /// The plain hotkey first, then the polish hotkey if there is one.
+    hotkeys: Vec<(Style, Hotkey)>,
+    /// Index into `hotkeys` of the one that started the current dictation.
+    active: usize,
     hands_free: Key,
     cancel: Key,
     down: HashSet<Key>,
@@ -226,7 +240,8 @@ pub struct Machine {
 impl Machine {
     pub fn new(hotkey: Hotkey, hands_free: Key, cancel: Key) -> Self {
         Self {
-            hotkey,
+            hotkeys: vec![(Style::Plain, hotkey)],
+            active: 0,
             hands_free,
             cancel,
             down: HashSet::new(),
@@ -235,8 +250,35 @@ impl Machine {
         }
     }
 
-    pub fn hotkey(&self) -> &Hotkey {
-        &self.hotkey
+    /// Adds the hotkey for polished dictations.
+    pub fn with_polish(mut self, hotkey: Option<Hotkey>) -> Self {
+        self.hotkeys.truncate(1);
+        if let Some(hotkey) = hotkey {
+            self.hotkeys.push((Style::Polish, hotkey));
+        }
+        self
+    }
+
+    pub fn hotkey_for(&self, style: Style) -> Option<&Hotkey> {
+        self.hotkeys.iter().find(|(s, _)| *s == style).map(|(_, h)| h)
+    }
+
+    /// The hotkey of the current (or last) dictation.
+    fn current(&self) -> &Hotkey {
+        &self.hotkeys[self.active].1
+    }
+
+    /// The hotkey that is held with nothing else, if `key` is part of it. When both are, the
+    /// longer one wins (it contains the other).
+    fn started_by(&self, key: Key) -> Option<usize> {
+        self.hotkeys
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, h))| {
+                h.contains(key) && h.satisfied_by(&self.down) && self.down.iter().all(|&k| h.contains(k))
+            })
+            .max_by_key(|(_, (_, h))| h.combo.len())
+            .map(|(i, _)| i)
     }
 
     /// Drops keys the platform reports as no longer held (missed key-up events, e.g. after the
@@ -245,7 +287,7 @@ impl Machine {
         self.down.retain(|&k| is_down(k));
         let down = &self.down;
         self.swallowed.retain(|k| down.contains(k));
-        if !self.hotkey.satisfied_by(&self.down) {
+        if !self.current().satisfied_by(&self.down) {
             match self.state {
                 State::WaitRelease => self.state = State::Idle,
                 State::HandsFree { .. } => self.state = State::HandsFree { released: true },
@@ -256,7 +298,7 @@ impl Machine {
 
     /// The app finished the dictation on its own (timeout, error): forget hands-free mode.
     pub fn reset(&mut self) {
-        self.state = if self.hotkey.satisfied_by(&self.down) { State::WaitRelease } else { State::Idle };
+        self.state = if self.current().satisfied_by(&self.down) { State::WaitRelease } else { State::Idle };
     }
 
     pub fn on_key(&mut self, key: Key, pressed: bool, now: Instant) -> Outcome {
@@ -277,17 +319,17 @@ impl Machine {
             return self.on_release(key);
         }
 
-        let active = self.hotkey.satisfied_by(&self.down);
+        let active = self.current().satisfied_by(&self.down);
         match self.state {
             State::Idle => {
-                let only_combo_keys = self.down.iter().all(|&k| self.hotkey.contains(k));
-                if active && only_combo_keys && self.hotkey.contains(key) {
+                if let Some(index) = self.started_by(key) {
+                    self.active = index;
                     self.state = State::Holding { since: now };
-                    return self.act(Action::Start, false);
+                    return self.act(Action::Start(self.hotkeys[index].0), false);
                 }
             }
             State::Holding { since } => {
-                if self.hotkey.contains(key) {
+                if self.current().contains(key) {
                     return Outcome::default();
                 }
                 if key == self.cancel {
@@ -297,6 +339,14 @@ impl Machine {
                 if key == self.hands_free {
                     self.state = State::HandsFree { released: false };
                     return self.swallow(key, Action::LockHandsFree);
+                }
+                // `fn` started a plain dictation and `shift` completes `fn+shift`: switch.
+                if now.duration_since(since) < SHORTCUT_WINDOW
+                    && let Some(index) = self.started_by(key)
+                    && index != self.active
+                {
+                    self.active = index;
+                    return self.act(Action::Start(self.hotkeys[index].0), false);
                 }
                 if now.duration_since(since) < SHORTCUT_WINDOW {
                     self.state = State::WaitRelease;
@@ -308,7 +358,7 @@ impl Machine {
                     self.state = if active { State::WaitRelease } else { State::Idle };
                     return self.swallow(key, Action::Cancel);
                 }
-                if released && active && self.hotkey.contains(key) {
+                if released && active && self.current().contains(key) {
                     self.state = State::WaitRelease;
                     return self.act(Action::Stop, false);
                 }
@@ -319,9 +369,9 @@ impl Machine {
     }
 
     fn on_release(&mut self, key: Key) -> Outcome {
-        let active = self.hotkey.satisfied_by(&self.down);
+        let active = self.current().satisfied_by(&self.down);
         match self.state {
-            State::Holding { .. } if self.hotkey.contains(key) && !active => {
+            State::Holding { .. } if self.current().contains(key) && !active => {
                 self.state = State::Idle;
                 self.act(Action::Stop, false)
             }
@@ -427,14 +477,14 @@ mod tests {
     fn hold_to_talk_either_order() {
         let mut h = Harness::new("ctrl+win");
         assert_eq!(h.act(Key::LCtrl, true), None);
-        assert_eq!(h.act(Key::LMeta, true), Some(Action::Start));
+        assert_eq!(h.act(Key::LMeta, true), Some(Action::Start(Style::Plain)));
         h.wait(2_000);
         assert_eq!(h.act(Key::LMeta, true), None, "auto-repeat is ignored");
         assert_eq!(h.act(Key::LCtrl, false), Some(Action::Stop));
         assert_eq!(h.act(Key::LMeta, false), None);
 
         assert_eq!(h.act(Key::RMeta, true), None);
-        assert_eq!(h.act(Key::RCtrl, true), Some(Action::Start));
+        assert_eq!(h.act(Key::RCtrl, true), Some(Action::Start(Style::Plain)));
         h.wait(500);
         assert_eq!(h.act(Key::RMeta, false), Some(Action::Stop));
         assert_eq!(h.act(Key::RCtrl, false), None);
@@ -444,7 +494,7 @@ mod tests {
     fn other_shortcut_aborts() {
         let mut h = Harness::new("ctrl+win");
         h.down(Key::LCtrl);
-        assert_eq!(h.act(Key::LMeta, true), Some(Action::Start));
+        assert_eq!(h.act(Key::LMeta, true), Some(Action::Start(Style::Plain)));
         h.wait(80);
         let o = h.down(Key::Char('d'));
         assert_eq!(o, Outcome { action: Some(Action::Abort), swallow: false });
@@ -453,7 +503,7 @@ mod tests {
         assert_eq!(h.act(Key::LCtrl, false), None);
         // Works again afterwards.
         h.down(Key::LCtrl);
-        assert_eq!(h.act(Key::LMeta, true), Some(Action::Start));
+        assert_eq!(h.act(Key::LMeta, true), Some(Action::Start(Style::Plain)));
     }
 
     #[test]
@@ -478,7 +528,7 @@ mod tests {
     fn hands_free_lock_and_stop() {
         let mut h = Harness::new("ctrl+win");
         h.down(Key::LCtrl);
-        assert_eq!(h.act(Key::LMeta, true), Some(Action::Start));
+        assert_eq!(h.act(Key::LMeta, true), Some(Action::Start(Style::Plain)));
         let o = h.down(Key::Space);
         assert_eq!(o, Outcome { action: Some(Action::LockHandsFree), swallow: true });
         assert!(h.up(Key::Space).swallow, "space release is hidden too");
@@ -493,7 +543,7 @@ mod tests {
         assert_eq!(h.act(Key::LCtrl, false), None);
         // Next press starts a fresh dictation.
         h.down(Key::LCtrl);
-        assert_eq!(h.act(Key::LMeta, true), Some(Action::Start));
+        assert_eq!(h.act(Key::LMeta, true), Some(Action::Start(Style::Plain)));
     }
 
     #[test]
@@ -518,23 +568,77 @@ mod tests {
         h.up(Key::RCtrl);
         assert_eq!(h.act(Key::Escape, true), Some(Action::Cancel));
         h.up(Key::Escape);
-        assert_eq!(h.act(Key::RCtrl, true), Some(Action::Start));
+        assert_eq!(h.act(Key::RCtrl, true), Some(Action::Start(Style::Plain)));
     }
 
     #[test]
     fn single_key_hotkey() {
         let mut h = Harness::new("right_ctrl");
-        assert_eq!(h.act(Key::RCtrl, true), Some(Action::Start));
+        assert_eq!(h.act(Key::RCtrl, true), Some(Action::Start(Style::Plain)));
         h.wait(900);
         assert_eq!(h.act(Key::RCtrl, false), Some(Action::Stop));
         assert_eq!(h.act(Key::LCtrl, true), None, "left ctrl is a different key");
+    }
+
+    fn with_polish(plain: &str, polish: &str) -> Harness {
+        let mut h = Harness::new(plain);
+        h.m = Machine::new(Hotkey::parse(plain).unwrap(), Key::Space, Key::Escape)
+            .with_polish(Some(Hotkey::parse(polish).unwrap()));
+        h
+    }
+
+    #[test]
+    fn polish_hotkey_starts_polished_dictations() {
+        let mut h = with_polish("fn", "right_alt");
+        assert_eq!(h.act(Key::RAlt, true), Some(Action::Start(Style::Polish)));
+        h.wait(1_000);
+        assert_eq!(h.act(Key::Fn, true), None, "the other hotkey does nothing while recording");
+        h.up(Key::Fn);
+        assert_eq!(h.act(Key::RAlt, false), Some(Action::Stop));
+        assert_eq!(h.act(Key::Fn, true), Some(Action::Start(Style::Plain)));
+        h.wait(1_000);
+        assert_eq!(h.act(Key::Fn, false), Some(Action::Stop));
+    }
+
+    #[test]
+    fn longer_polish_hotkey_switches_a_fresh_dictation() {
+        let mut h = with_polish("fn", "fn+shift");
+        assert_eq!(h.act(Key::Fn, true), Some(Action::Start(Style::Plain)));
+        h.wait(100);
+        assert_eq!(h.act(Key::LShift, true), Some(Action::Start(Style::Polish)));
+        h.wait(1_000);
+        assert_eq!(h.act(Key::LShift, false), Some(Action::Stop));
+        assert_eq!(h.act(Key::Fn, false), None);
+
+        // Shift first starts the polished dictation directly.
+        h.down(Key::LShift);
+        assert_eq!(h.act(Key::Fn, true), Some(Action::Start(Style::Polish)));
+        h.wait(1_000);
+        assert_eq!(h.act(Key::Fn, false), Some(Action::Stop));
+        h.up(Key::LShift);
+
+        // Too late to be part of the hotkey: just a key pressed during dictation.
+        h.down(Key::Fn);
+        h.wait(1_000);
+        assert_eq!(h.act(Key::LShift, true), None);
+    }
+
+    #[test]
+    fn polish_hands_free_stops_with_its_own_hotkey() {
+        let mut h = with_polish("fn", "right_alt");
+        h.down(Key::RAlt);
+        assert_eq!(h.act(Key::Space, true), Some(Action::LockHandsFree));
+        h.up(Key::Space);
+        h.up(Key::RAlt);
+        h.wait(5_000);
+        assert_eq!(h.act(Key::RAlt, true), Some(Action::Stop));
     }
 
     #[test]
     fn resync_recovers_from_missed_key_up() {
         let mut h = Harness::new("ctrl+win");
         h.down(Key::LCtrl);
-        assert_eq!(h.act(Key::LMeta, true), Some(Action::Start));
+        assert_eq!(h.act(Key::LMeta, true), Some(Action::Start(Style::Plain)));
         h.down(Key::Space); // hands-free
         // Key-ups were swallowed by the secure desktop; the platform says nothing is held now.
         h.m.resync(|_| false);

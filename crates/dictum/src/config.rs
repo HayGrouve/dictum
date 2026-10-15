@@ -34,6 +34,51 @@ pub enum DeviceSetting {
     Gpu,
 }
 
+/// The second hotkey: dictations rewritten by Claude into a clean coding prompt.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct PolishConfig {
+    /// Empty: no polish hotkey.
+    pub hotkey: String,
+    /// Anthropic API key; empty means the `ANTHROPIC_API_KEY` environment variable.
+    pub api_key: String,
+    pub model: String,
+    /// After this long past the release, the unpolished text is inserted instead.
+    pub timeout_ms: u64,
+    /// Added to the built-in instructions, e.g. the project's stack or preferred structure.
+    pub instructions: String,
+}
+
+impl Default for PolishConfig {
+    fn default() -> Self {
+        Self {
+            hotkey: String::new(),
+            api_key: String::new(),
+            model: "claude-haiku-5-5".to_string(),
+            timeout_ms: 4000,
+            instructions: String::new(),
+        }
+    }
+}
+
+/// What the Console lists for each key ("apikey_01…"); the key itself starts with "sk-ant-".
+pub const KEY_ID_PREFIX: &str = "apikey_";
+
+/// Why a pasted API key can't be right.
+pub const KEY_ID_HINT: &str = "That is the key's ID from the Console's list of keys, not the key \
+    itself. An API key starts with “sk-ant-”; the Console shows it only once, when you create it.";
+
+impl PolishConfig {
+    /// The configured key, or `ANTHROPIC_API_KEY` from the environment.
+    pub fn api_key(&self) -> Option<String> {
+        let key = self.api_key.trim();
+        if !key.is_empty() {
+            return Some(key.to_string());
+        }
+        std::env::var("ANTHROPIC_API_KEY").ok().map(|k| k.trim().to_string()).filter(|k| !k.is_empty())
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -55,6 +100,7 @@ pub struct Config {
     pub max_recording_secs: u32,
     pub vocabulary: Vec<String>,
     pub replacements: BTreeMap<String, String>,
+    pub polish: PolishConfig,
 }
 
 impl Default for Config {
@@ -78,6 +124,7 @@ impl Default for Config {
             max_recording_secs: 600,
             vocabulary: Vec::new(),
             replacements: BTreeMap::new(),
+            polish: PolishConfig::default(),
         }
     }
 }
@@ -86,6 +133,8 @@ impl Default for Config {
 #[derive(Debug, Clone)]
 pub struct Bindings {
     pub hotkey: Hotkey,
+    /// The hotkey for polished dictations, if one is set.
+    pub polish: Option<Hotkey>,
     pub hands_free: Key,
     pub cancel: Key,
 }
@@ -95,7 +144,17 @@ impl Config {
         let hotkey = Hotkey::parse(&self.hotkey).context("invalid `hotkey`")?;
         let hands_free = hotkey::parse_key(&self.hands_free_key).context("invalid `hands_free_key`")?;
         let cancel = hotkey::parse_key(&self.cancel_key).context("invalid `cancel_key`")?;
-        Ok(Bindings { hotkey, hands_free, cancel })
+        let polish = match self.polish.hotkey.trim() {
+            "" => None,
+            spec => Some(Hotkey::parse(spec).context("invalid `polish.hotkey`")?),
+        };
+        if polish.as_ref() == Some(&hotkey) {
+            bail!("the polish hotkey is the same as the dictation hotkey");
+        }
+        if polish.as_ref().is_some_and(|p| p.contains(hands_free) || p.contains(cancel)) {
+            bail!("the polish hotkey can't use the hands-free or cancel key");
+        }
+        Ok(Bindings { hotkey, polish, hands_free, cancel })
     }
 
     pub fn text_options(&self) -> dictum_engine::text::TextOptions {
@@ -200,6 +259,25 @@ fn edit(text: &str, from: &Config, to: &Config) -> Result<String> {
             }
         }
     }
+
+    if from.polish.hotkey != to.polish.hotkey || from.polish.api_key != to.polish.api_key {
+        // Files from before the polish hotkey end with `[replacements]` and a commented example:
+        // a new table goes after that comment, not between it and its table.
+        let trailing = doc.trailing().as_str().unwrap_or_default().to_string();
+        if !doc.contains_key("polish") {
+            let mut table = Table::new();
+            table.decor_mut().set_prefix(format!("{trailing}\n"));
+            doc.insert("polish", Item::Table(table));
+            doc.set_trailing("");
+        }
+        let Some(table) = doc["polish"].as_table_mut() else { bail!("`polish` is not a table") };
+        if from.polish.hotkey != to.polish.hotkey {
+            set_value(table, "hotkey", to.polish.hotkey.as_str().into());
+        }
+        if from.polish.api_key != to.polish.api_key {
+            set_value(table, "api_key", to.polish.api_key.as_str().into());
+        }
+    }
     Ok(doc.to_string())
 }
 
@@ -288,6 +366,25 @@ vocabulary = []
 # Personal dictionary: "what the model hears" = "what you want".
 [replacements]
 # "get hub" = "GitHub"
+
+# A second hotkey whose dictations Claude rewrites into a clean coding prompt: self-corrections
+# ("actually, scratch that") applied, sentences fixed, longer requests structured as a goal plus
+# bullet points. The text is sent to Anthropic's API; audio never leaves this computer.
+[polish]
+# Empty turns it off. Examples: "right_option", "right_cmd", "fn+shift" (macOS), "right_ctrl".
+hotkey = ""
+
+# Anthropic API key (console.anthropic.com). Empty: the ANTHROPIC_API_KEY environment variable.
+api_key = ""
+
+model = "claude-haiku-5-5"
+
+# If the polished text isn't back this long after you release the key, the plain text is
+# inserted instead.
+timeout_ms = 4000
+
+# Extra instructions for the rewrite, e.g. "We use Next.js App Router, Tailwind and Convex."
+instructions = ""
 "#
     )
 }
@@ -327,6 +424,24 @@ mod tests {
     fn invalid_hotkey_is_rejected() {
         assert!(Config::parse("hotkey = \"ctrl+banana\"").is_err());
         assert!(Config::parse("insert_method = \"teleport\"").is_err());
+    }
+
+    #[test]
+    fn polish_section_is_optional_and_validated() {
+        let plain = Config::parse("hotkey = \"fn\"\n").unwrap();
+        assert!(plain.bindings().unwrap().polish.is_none());
+        assert_eq!(plain.polish.model, "claude-haiku-5-5");
+
+        let c =
+            Config::parse("hotkey = \"fn\"\n[polish]\nhotkey = \"right_option\"\napi_key = \" sk-test \"\n")
+                .unwrap();
+        assert_eq!(c.bindings().unwrap().polish, Some(Hotkey::parse("right_alt").unwrap()));
+        assert_eq!(c.polish.api_key().as_deref(), Some("sk-test"));
+        assert_eq!(c.polish.timeout_ms, 4000);
+
+        assert!(Config::parse("hotkey = \"fn\"\n[polish]\nhotkey = \"fn\"\n").is_err());
+        assert!(Config::parse("[polish]\nhotkey = \"right_alt+space\"\n").is_err());
+        assert!(Config::parse("[polish]\nhotkey = \"banana\"\n").is_err());
     }
 
     #[test]
@@ -376,6 +491,45 @@ mod tests {
         assert!(!reparsed.remove_fillers);
         assert_eq!(reparsed.vocabulary, to.vocabulary);
         assert_eq!(reparsed.replacements, to.replacements);
+    }
+
+    #[test]
+    fn api_key_is_written_into_the_polish_table() {
+        // The default file has the table: the key replaces the empty one in place.
+        let text = default_file();
+        let from = Config::parse(&text).unwrap();
+        let mut to = from.clone();
+        to.polish.api_key = "sk-ant-test".into();
+        let edited = edit(&text, &from, &to).unwrap();
+        assert!(edited.contains("the ANTHROPIC_API_KEY environment variable.\napi_key = \"sk-ant-test\"\n"));
+        assert_eq!(edited.matches("api_key").count(), text.matches("api_key").count());
+        assert_eq!(Config::parse(&edited).unwrap().polish.api_key, "sk-ant-test");
+
+        // An older file without one gets a new table at the end, after `[replacements]` and the
+        // example under it.
+        let text = "hotkey = \"fn\"\n\n[replacements]\n# \"get hub\" = \"GitHub\"\n";
+        let from = Config::parse(text).unwrap();
+        let mut to = from.clone();
+        to.polish.hotkey = "right_cmd".into();
+        let edited = edit(text, &from, &to).unwrap();
+        assert_eq!(edited, format!("{text}\n[polish]\nhotkey = \"right_cmd\"\n"));
+
+        let text = "hotkey = \"fn\"\n\n[replacements]\n\"get hub\" = \"GitHub\"\n";
+        let from = Config::parse(text).unwrap();
+        let mut to = from.clone();
+        to.polish.api_key = "sk-ant-test".into();
+        let edited = edit(text, &from, &to).unwrap();
+        assert!(edited.starts_with(text));
+        let reparsed = Config::parse(&edited).unwrap();
+        assert_eq!(reparsed.polish.api_key, "sk-ant-test");
+        assert_eq!(reparsed.replacements, from.replacements);
+
+        // The hotkey goes into the same table, next to the key.
+        let mut again = to.clone();
+        again.polish.hotkey = "right_option".into();
+        let twice = edit(&edited, &to, &again).unwrap();
+        assert_eq!(twice.matches("[polish]").count(), 1);
+        assert_eq!(Config::parse(&twice).unwrap().polish.hotkey, "right_option");
     }
 
     #[test]

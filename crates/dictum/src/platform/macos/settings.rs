@@ -32,6 +32,7 @@ enum Widget {
     Combo(Retained<NSComboBox>),
     Popup(Retained<NSPopUpButton>),
     Check(Retained<NSButton>),
+    Line(Retained<NSTextField>),
     Text(Retained<NSTextView>),
 }
 
@@ -41,6 +42,7 @@ impl Widget {
             Widget::Combo(combo) => Value::Text(combo.stringValue().to_string()),
             Widget::Popup(popup) => Value::Choice(usize::try_from(popup.indexOfSelectedItem()).ok()),
             Widget::Check(check) => Value::Check(check.state() == NSControlStateValueOn),
+            Widget::Line(field) => Value::Text(field.stringValue().to_string()),
             Widget::Text(text) => Value::Text(text.string().to_string()),
         }
     }
@@ -52,6 +54,7 @@ impl Widget {
             (Widget::Check(check), Value::Check(on)) => {
                 check.setState(if *on { NSControlStateValueOn } else { NSControlStateValueOff })
             }
+            (Widget::Line(field), Value::Text(text)) => field.setStringValue(&NSString::from_str(text)),
             (Widget::Text(view), Value::Text(text)) => view.setString(&NSString::from_str(text)),
             _ => {}
         }
@@ -80,6 +83,7 @@ impl Widget {
             Widget::Combo(combo) => combo.setEnabled(enabled),
             Widget::Popup(popup) => popup.setEnabled(enabled),
             Widget::Check(check) => check.setEnabled(enabled),
+            Widget::Line(field) => field.setEnabled(enabled),
             Widget::Text(text) => text.setEditable(enabled),
         }
     }
@@ -90,6 +94,7 @@ impl Widget {
             Widget::Combo(combo) => combo,
             Widget::Popup(popup) => popup,
             Widget::Check(check) => check,
+            Widget::Line(field) => field,
             Widget::Text(text) => text,
         }
     }
@@ -147,15 +152,24 @@ define_class!(
     unsafe impl NSTextFieldDelegate for Controller {}
 
     unsafe impl NSComboBoxDelegate for Controller {
-        // The text isn't updated yet when the selection changes: use the preset.
+        // The text isn't updated yet when the selection changes: use the selected entry.
         #[unsafe(method(comboBoxSelectionDidChange:))]
         fn combo_selection_did_change(&self, notification: &NSNotification) {
-            let combo = notification.object().and_then(|o| o.downcast::<NSComboBox>().ok());
-            let preset = combo
-                .and_then(|c| usize::try_from(c.indexOfSelectedItem()).ok())
-                .and_then(|i| settings::HOTKEY_PRESETS.get(i));
-            if let Some(preset) = preset {
-                refresh(Some(&settings::hotkey_label(preset)));
+            let Some(combo) = notification.object().and_then(|o| o.downcast::<NSComboBox>().ok()) else {
+                return;
+            };
+            let Ok(index) = usize::try_from(combo.indexOfSelectedItem()) else { return };
+            let selected = OPEN.with(|o| {
+                let o = o.try_borrow().ok()?;
+                let settings = o.as_ref()?;
+                let field = settings.widgets.iter().find_map(|(field, widget)| match widget {
+                    Widget::Combo(c) if std::ptr::eq(&**c, &*combo) => Some(*field),
+                    _ => None,
+                })?;
+                Some((field, settings.form.options(field).get(index)?.clone()))
+            });
+            if let Some(selected) = selected {
+                refresh(Some(selected));
             }
         }
     }
@@ -268,18 +282,23 @@ fn show_microphones(devices: &[String]) {
 }
 
 /// Updates what depends on other fields: which can be changed, and the "Controls" lines (left as
-/// they are while the hotkey is still being typed). `hotkey` stands in for the hotkey field's
-/// text, which isn't updated yet while its selection changes.
-fn refresh(hotkey: Option<&str>) {
+/// they are while a hotkey is still being typed). `selected` is a hotkey field whose selection
+/// just changed, with the entry's text: the field itself isn't updated yet.
+fn refresh(selected: Option<(Field, String)>) {
     OPEN.with(|o| {
         let Ok(o) = o.try_borrow() else { return };
         let Some(settings) = o.as_ref() else { return };
         for (field, widget) in &settings.widgets {
             widget.set_enabled(Form::enabled(*field, |f| settings.value(f)));
         }
-        let hotkey = hotkey.map_or_else(|| settings.value(Field::Hotkey), |h| Value::Text(h.to_string()));
-        let Value::Text(hotkey) = hotkey else { return };
-        if let Some(lines) = settings.form.controls(&hotkey) {
+        let text = |field: Field| match &selected {
+            Some((f, text)) if *f == field => text.clone(),
+            _ => match settings.value(field) {
+                Value::Text(text) => text,
+                _ => String::new(),
+            },
+        };
+        if let Some(lines) = settings.form.controls(&text(Field::Hotkey), &text(Field::PolishHotkey)) {
             for (label, line) in settings.controls.iter().zip(lines) {
                 label.setStringValue(&NSString::from_str(&line));
             }
@@ -411,6 +430,14 @@ impl Builder<'_> {
                 self.add(&check, rect(x, y, COLUMN, 18.0));
                 (Widget::Check(check), 24.0)
             }
+            Control::Text { label, placeholder } => {
+                let text = self.label(&plain(label), rect(x, y + 4.0, LABEL_WIDTH - 8.0, 17.0));
+                text.setAlignment(NSTextAlignment::Right);
+                let field = NSTextField::textFieldWithString(&NSString::from_str(""), self.mtm);
+                field.setPlaceholderString(Some(&NSString::from_str(placeholder)));
+                self.add(&field, rect(x + LABEL_WIDTH, y + 1.0, COLUMN - LABEL_WIDTH, 22.0));
+                (Widget::Line(field), 32.0)
+            }
             Control::Lines { label } => {
                 let label_height = self.wrapping_label(&plain(label), NSPoint::new(x, y));
                 let scroll = NSTextView::scrollableTextView(self.mtm);
@@ -443,7 +470,7 @@ fn section_height(mtm: MainThreadMarker, section: Section, text_height: f64) -> 
         .fields()
         .iter()
         .map(|f| match f.control() {
-            Control::Choice { .. } => 32.0,
+            Control::Choice { .. } | Control::Text { .. } => 32.0,
             Control::Check { .. } => 24.0,
             Control::Lines { label } => wrapped_height(mtm, &plain(label)) + 6.0 + text_height + 14.0,
         })
@@ -482,7 +509,8 @@ fn build(mtm: MainThreadMarker, form: Form, config_file: PathBuf) -> SettingsWin
 
     let width = MARGIN * 2.0 + COLUMN * 2.0 + COLUMN_GAP;
     let controls_top = MARGIN + columns_height + SECTION_GAP;
-    let buttons_top = controls_top + 25.0 + 3.0 * 20.0 + 18.0 + SECTION_GAP;
+    let lines = settings::CONTROLS_LINES as f64;
+    let buttons_top = controls_top + 25.0 + lines * 20.0 + 18.0 + SECTION_GAP;
     let height = buttons_top + 32.0 + MARGIN;
 
     let content = FlippedView::new(mtm, rect(0.0, 0.0, width, height));
@@ -511,10 +539,10 @@ fn build(mtm: MainThreadMarker, form: Form, config_file: PathBuf) -> SettingsWin
 
     let full = width - 2.0 * MARGIN;
     b.heading(settings::CONTROLS_TITLE, MARGIN, controls_top, full);
-    let controls = (0..3)
-        .map(|i| b.label("", rect(MARGIN, controls_top + 25.0 + 20.0 * f64::from(i), full, 17.0)))
+    let controls = (0..settings::CONTROLS_LINES)
+        .map(|i| b.label("", rect(MARGIN, controls_top + 25.0 + 20.0 * i as f64, full, 17.0)))
         .collect();
-    b.note(settings::CONTROLS_NOTE, rect(MARGIN, controls_top + 25.0 + 60.0, full, 16.0));
+    b.note(settings::CONTROLS_NOTE, rect(MARGIN, controls_top + 25.0 + 20.0 * lines, full, 16.0));
 
     let open_file = b.button(&plain(settings::OPEN_FILE), sel!(dictumOpenFile:));
     open_file.sizeToFit();

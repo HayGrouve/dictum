@@ -17,12 +17,11 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 
 use super::{input, keys};
 use crate::app::Command;
-use crate::hotkey::{Action, Machine};
+use crate::hotkey::{Action, Hotkey, Machine};
 
 struct HookState {
     machine: Machine,
     commands: Sender<Command>,
-    mask_menu: bool,
 }
 
 thread_local! {
@@ -40,8 +39,7 @@ impl Drop for Hook {
 
 /// Installs the hook for the calling thread's message loop.
 pub fn install(machine: Machine, commands: Sender<Command>) -> Result<Hook> {
-    let mask_menu = machine.hotkey().needs_menu_mask();
-    STATE.with(|s| *s.borrow_mut() = Some(HookState { machine, commands, mask_menu }));
+    STATE.with(|s| *s.borrow_mut() = Some(HookState { machine, commands }));
     let hook =
         unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook_proc), GetModuleHandleW(std::ptr::null()), 0) };
     if hook.is_null() {
@@ -86,7 +84,12 @@ fn handle(key: crate::hotkey::Key, pressed: bool) -> bool {
         if let Some(action) = outcome.action {
             let _ = state.commands.send(Command::Hotkey(action));
         }
-        let mask = state.mask_menu && outcome.action == Some(Action::Start);
+        let mask = match outcome.action {
+            Some(Action::Start(style)) => {
+                state.machine.hotkey_for(style).is_some_and(Hotkey::needs_menu_mask)
+            }
+            _ => false,
+        };
         Some((outcome.swallow, mask))
     });
     let Some((swallow, mask)) = result else { return false };
